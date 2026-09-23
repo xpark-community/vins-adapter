@@ -33,6 +33,12 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG JOBS=
 # JOBS empty -> resolved to the number of CPUs visible inside the container.
 
+# GPU build: optional, requires a CUDA-enabled OpenCV staged at
+# OPENCV_CUDA_DIR (build_vins_adapter.sh --opencv-cuda copies it into
+# .opencv-cuda/ in the build context). Set BUILD_GPU=0 to skip it.
+ARG BUILD_GPU=1
+ARG OPENCV_CUDA_DIR=/opt/opencv-cuda
+
 # The base image only ships Miniforge (/opt/conda); add the build toolchain.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -145,3 +151,105 @@ RUN source /opt/conda/etc/profile.d/conda.sh && conda activate /opt/ros1 \
     && unset LD_LIBRARY_PATH \
     && patchelf --force-rpath --set-rpath '$ORIGIN/lib' /out/vins_adapter \
     && for f in /out/lib/*; do patchelf --set-rpath '$ORIGIN' "$f"; done
+
+# ---------------------------------------------------------------------------
+# GPU variant (optional, BUILD_GPU=1). A SECOND catkin workspace is required:
+# the CUDA fork reuses the CPU fork's catkin package names (camera_models,
+# vins), so it cannot share /ws. The CUDA-enabled OpenCV is staged into the
+# build context at .opencv-cuda/ and copied to OPENCV_CUDA_DIR; it is assumed
+# provided and is deliberately NOT bundled into the artifact -- the GPU worker
+# supplies matching CUDA + OpenCV at runtime.
+COPY .opencv-cuda/ /opt/opencv-cuda/
+
+WORKDIR /ws_gpu/src
+COPY VINS-Fusion-gpu/ /ws_gpu/src/VINS-Fusion-gpu/
+# Same toolchain patches as the CPU fork: c++14 (gcc-11 + ceres 2.1) and
+# modern OpenCV constants.
+RUN sed -i 's/-std=c++11/-std=c++14/g' \
+    VINS-Fusion-gpu/vins_estimator/CMakeLists.txt \
+    VINS-Fusion-gpu/camera_models/CMakeLists.txt \
+    VINS-Fusion-gpu/loop_fusion/CMakeLists.txt \
+    VINS-Fusion-gpu/global_fusion/CMakeLists.txt \
+    && find VINS-Fusion-gpu/camera_models/src VINS-Fusion-gpu/vins_estimator/src \
+        -name '*.cc' -o -name '*.cpp' \
+    | xargs sed -i \
+        -e 's/\bCV_GRAY2BGR\b/cv::COLOR_GRAY2BGR/g' \
+        -e 's/\bCV_GRAY2RGB\b/cv::COLOR_GRAY2RGB/g' \
+        -e 's/\bCV_BGR2GRAY\b/cv::COLOR_BGR2GRAY/g' \
+        -e 's/\bCV_CALIB_CB_ADAPTIVE_THRESH\b/cv::CALIB_CB_ADAPTIVE_THRESH/g' \
+        -e 's/\bCV_CALIB_CB_NORMALIZE_IMAGE\b/cv::CALIB_CB_NORMALIZE_IMAGE/g' \
+        -e 's/\bCV_CALIB_CB_FILTER_QUADS\b/cv::CALIB_CB_FILTER_QUADS/g' \
+        -e 's/\bCV_CALIB_CB_FAST_CHECK\b/cv::CALIB_CB_FAST_CHECK/g' \
+        -e 's/\bCV_CHAIN_APPROX_SIMPLE\b/cv::CHAIN_APPROX_SIMPLE/g' \
+        -e 's/\bCV_RETR_CCOMP\b/cv::RETR_CCOMP/g' \
+        -e 's/\bCV_ADAPTIVE_THRESH_MEAN_C\b/cv::ADAPTIVE_THRESH_MEAN_C/g' \
+        -e 's/\bCV_SHAPE_CROSS\b/cv::MORPH_CROSS/g' \
+        -e 's/\bCV_SHAPE_RECT\b/cv::MORPH_RECT/g' \
+        -e 's/\bCV_TERMCRIT_ITER\b/cv::TermCriteria::MAX_ITER/g' \
+        -e 's/\bCV_TERMCRIT_EPS\b/cv::TermCriteria::EPS/g' \
+        -e 's/\bCV_THRESH_BINARY_INV\b/cv::THRESH_BINARY_INV/g' \
+        -e 's/\bCV_THRESH_BINARY\b/cv::THRESH_BINARY/g' \
+        -e 's/\bCV_AA\b/cv::LINE_AA/g' \
+        -e 's/\bCV_LOAD_IMAGE_GRAYSCALE\b/cv::IMREAD_GRAYSCALE/g' \
+        -e 's/\bCV_LOAD_IMAGE_COLOR\b/cv::IMREAD_COLOR/g'
+
+COPY adapter/vins_adapter.cpp VINS-Fusion-gpu/vins_estimator/src/adapter_main.cpp
+COPY adapter/adapter.cmake VINS-Fusion-gpu/vins_estimator/adapter.cmake
+RUN echo "include(adapter.cmake)" >> VINS-Fusion-gpu/vins_estimator/CMakeLists.txt
+
+# Fail fast when a GPU build was requested but the staged OpenCV is missing or
+# was not built with CUDA (no OpenCVConfig.cmake to point -DOpenCV_DIR at).
+RUN if [ "$BUILD_GPU" = "1" ]; then \
+      test -f "$OPENCV_CUDA_DIR/OpenCVConfig.cmake" \
+        -o -f "$OPENCV_CUDA_DIR/lib/cmake/opencv4/OpenCVConfig.cmake" \
+        -o -f "$OPENCV_CUDA_DIR/lib64/cmake/opencv4/OpenCVConfig.cmake" \
+      || { echo "BUILD_GPU=1 but no OpenCVConfig.cmake under $OPENCV_CUDA_DIR" >&2; exit 1; }; \
+    fi
+
+RUN if [ "$BUILD_GPU" = "1" ]; then \
+      source /opt/conda/etc/profile.d/conda.sh && conda activate /opt/ros1 \
+      && ocv_dir="$OPENCV_CUDA_DIR" \
+      && for c in "$OPENCV_CUDA_DIR/OpenCVConfig.cmake" \
+                  "$OPENCV_CUDA_DIR/lib/cmake/opencv4/OpenCVConfig.cmake" \
+                  "$OPENCV_CUDA_DIR/lib64/cmake/opencv4/OpenCVConfig.cmake"; do \
+           if [ -f "$c" ]; then ocv_dir="$(dirname "$c")"; break; fi; \
+         done \
+      && cd /ws_gpu \
+      && catkin init \
+      && catkin config --cmake-args \
+          -DVINS_GPU=ON \
+          -DOpenCV_DIR="$ocv_dir" \
+          -DEigen3_DIR=/opt/ros1/share/eigen3/cmake \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_FLAGS=-DNDEBUG \
+          -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,"$OPENCV_CUDA_DIR"/lib,/opt/ros1/lib,--allow-shlib-undefined \
+      && catkin build --no-status -j"${JOBS:-$(nproc)}" vins; \
+    fi
+
+# Smoke test (usage error = exit 2, before any CUDA call, so no GPU is needed),
+# then bundle the GPU binary with its non-glibc, non-CUDA, non-OpenCV shared
+# libraries into /out/lib_gpu. The CUDA/OpenCV closure is intentionally left
+# out: the GPU worker provides a matching build. Its own lib dir keeps it from
+# picking up the CPU bundle's conda OpenCV ($ORIGIN/lib).
+RUN if [ "$BUILD_GPU" = "1" ]; then \
+      source /opt/conda/etc/profile.d/conda.sh && conda activate /opt/ros1 \
+      && LD_LIBRARY_PATH="$OPENCV_CUDA_DIR"/lib /ws_gpu/devel/lib/vins/vins_adapter_gpu 2>/dev/null; test $? -eq 2 \
+      && mkdir -p /out/lib_gpu \
+      && cp /ws_gpu/devel/lib/vins/vins_adapter_gpu /out/vins_adapter_gpu \
+      && export LD_LIBRARY_PATH=/out/lib_gpu:"$OPENCV_CUDA_DIR"/lib:/opt/ros1/lib \
+      && for pass in 1 2 3 4 5 6; do \
+          { ldd /out/vins_adapter_gpu; ldd /out/lib_gpu/*; } 2>/dev/null \
+            | awk '/=> \// && $3 ~ /^\// && $3 !~ /^\/out\// \
+                   && $3 !~ /\/(ld-linux|ld-2|ld\.so|libc|libm|libpthread|libdl|librt|libnsl|libnss|libresolv|libutil|libanl)[-._]/ \
+                   && $3 !~ /libopencv_/ && $3 !~ /libcudart/ && $3 !~ /libcuda\.so/ \
+                   && $3 !~ /libcublas/ && $3 !~ /libcufft/ && $3 !~ /libcudnn/ \
+                   && $3 !~ /libnpp/ && $3 !~ /libnvrtc/ && $3 !~ /libnvjpeg/ \
+                   && $3 !~ /libnvinfer/ && $3 !~ /libnvidia/ \
+                   && $3 !~ /libGL/ && $3 !~ /libGLX/ && $3 !~ /libEGL/ && $3 !~ /libOpenCL/ {print $3}' \
+            | sort -u \
+            | xargs -r cp -L -t /out/lib_gpu/; \
+         done \
+      && unset LD_LIBRARY_PATH \
+      && patchelf --force-rpath --set-rpath '$ORIGIN/lib_gpu' /out/vins_adapter_gpu \
+      && for f in /out/lib_gpu/*; do patchelf --set-rpath '$ORIGIN' "$f"; done; \
+    fi

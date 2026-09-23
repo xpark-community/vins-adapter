@@ -1,6 +1,10 @@
 # Appended to the fork's vins_estimator/CMakeLists.txt by the Dockerfile.
 # Runs in that package's scope: catkin_* / OpenCV / Ceres variables and the
 # vins_lib target are already defined there.
+#
+# Built in two workspaces: the CPU fork builds vins_adapter, the CUDA fork
+# builds vins_adapter_gpu (VINS_GPU=ON, which also defines VINS_GPU so the
+# shared adapter_main.cpp can set the fork's GPU globals).
 
 find_package(yaml-cpp REQUIRED)
 
@@ -20,10 +24,19 @@ else()
     REQUIRED)
 endif()
 
-add_executable(vins_adapter src/adapter_main.cpp)
-set_property(TARGET vins_adapter PROPERTY CXX_STANDARD 17)
-set_property(TARGET vins_adapter PROPERTY CXX_STANDARD_REQUIRED ON)
-target_link_libraries(vins_adapter
+if(VINS_GPU)
+  set(VINS_ADAPTER_TARGET vins_adapter_gpu)
+else()
+  set(VINS_ADAPTER_TARGET vins_adapter)
+endif()
+
+add_executable(${VINS_ADAPTER_TARGET} src/adapter_main.cpp)
+if(VINS_GPU)
+  target_compile_definitions(${VINS_ADAPTER_TARGET} PRIVATE VINS_GPU=1)
+endif()
+set_property(TARGET ${VINS_ADAPTER_TARGET} PROPERTY CXX_STANDARD 17)
+set_property(TARGET ${VINS_ADAPTER_TARGET} PROPERTY CXX_STANDARD_REQUIRED ON)
+target_link_libraries(${VINS_ADAPTER_TARGET}
   vins_lib
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}

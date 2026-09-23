@@ -16,6 +16,14 @@
 #   --remote HOST     build on a remote (ideally native-amd64 Linux) docker
 #                     daemon over ssh instead of the local one; the context is
 #                     streamed and the binary copied back automatically
+#   --opencv-cuda DIR build the GPU variant too, linking the CUDA-enabled
+#                     OpenCV installed at host DIR (must contain
+#                     OpenCVConfig.cmake or lib/cmake/opencv4/OpenCVConfig.cmake).
+#                     DIR is staged into the build context and is NOT bundled:
+#                     the GPU worker must provide the same CUDA + OpenCV at
+#                     runtime. Without this option the bundle is CPU-only.
+#   --cpu-only        explicitly skip the GPU variant (default when
+#                     --opencv-cuda is omitted)
 #   --force           docker build --no-cache (otherwise cached layers are
 #                     reused and a matching ref does not rebuild)
 #   --check           only verify the copied adapter, do not build
@@ -89,6 +97,20 @@
 # Unpack it anywhere and run ./run_vins_adapter.sh <config.yaml> <output.tum>.
 # It is a Linux ELF: do not run it on macOS directly.
 #
+# CPU vs GPU
+# ----------
+# With --opencv-cuda the bundle carries TWO binaries: the CPU vins_adapter and
+# the CUDA vins_adapter_gpu (built from VINS-Fusion-gpu). The launcher uses the
+# GPU binary by default, falls back to the CPU one when the worker has no
+# usable CUDA device or is missing the matching CUDA/OpenCV libraries, and
+# honors --cpu:
+#   ./run_vins_adapter.sh <config.yaml> <output.tum>        # GPU (if usable)
+#   ./run_vins_adapter.sh --cpu <config.yaml> <output.tum>  # force CPU
+# The GPU binary's own lib dir is lib_gpu/ (rpath $ORIGIN/lib_gpu, kept separate
+# so it never loads the CPU bundle's conda OpenCV). CUDA and the CUDA-enabled
+# OpenCV are worker-provided: the same build the --opencv-cuda dir pointed at
+# must be on the worker (VINS_OPENCV_CUDA_DIR, LD_LIBRARY_PATH, or ldconfig).
+#
 # Two conversion traps when bridging VINS-Fusion's own output
 # -----------------------------------------------------------
 #   vio.csv is:  ts_ns, px,py,pz, qw,qx,qy,qz, vx,vy,vz     (qw FIRST, ns)
@@ -107,6 +129,9 @@ JOBS=""
 PLATFORM=""            # empty = auto: arch of the host that compiles
 REMOTE=""
 REMOTE_ARCH=""         # arch reported by a --remote docker daemon
+OPENCV_CUDA=""         # host dir of a CUDA-enabled OpenCV (enables the GPU build)
+CPU_ONLY=0
+BUILD_GPU=0
 FORCE=0
 CHECK=0
 SKIP_TESTS=0
@@ -119,6 +144,8 @@ while [[ $# -gt 0 ]]; do
     --out)      OUT="$2"; shift 2 ;;
     --jobs)     JOBS="$2"; shift 2 ;;
     --platform) PLATFORM="$2"; shift 2 ;;
+    --opencv-cuda) OPENCV_CUDA="$2"; shift 2 ;;
+    --cpu-only) CPU_ONLY=1; shift ;;
     --force)    FORCE=1; shift ;;
     --check)    CHECK=1; shift ;;
     --skip-tests) SKIP_TESTS=1; shift ;;
@@ -128,9 +155,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 log() { printf '\033[1m[vins-build]\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m[vins-build] warning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31m[vins-build] error:\033[0m %s\n' "$*" >&2; exit 1; }
 
 BIN="$OUT/vins_adapter"
+BIN_GPU="$OUT/vins_adapter_gpu"
+
+# Decide whether the GPU variant is part of this build. --cpu-only wins; else a
+# staged CUDA OpenCV (--opencv-cuda) enables it; else CPU-only with a note.
+if [[ "$CPU_ONLY" -eq 1 ]]; then
+  BUILD_GPU=0
+elif [[ -n "$OPENCV_CUDA" ]]; then
+  BUILD_GPU=1
+else
+  BUILD_GPU=0
+fi
 
 verify() {
   [[ -x "$BIN" ]] || die "no adapter at $BIN"
@@ -200,6 +239,65 @@ verify() {
     actual="$(_md5 "$tarball")"
     [[ "$actual" == "$expected" ]] || die "bundle checksum mismatch: $tarball.md5 says $expected, tarball is $actual"
     log "bundle: $tarball md5 verified ($actual)"
+  fi
+}
+
+# True when this host is Linux and matches the artifact arch -- only then can
+# the copied ELF actually be executed here (not on macOS, not cross-arch).
+host_can_run() {
+  [[ "$(uname -s)" == "Linux" \
+     && "$PKG_ARCH" == "$(arch_to_pkg "$(detect_host_arch 2>/dev/null || echo unknown)")" ]]
+}
+
+# Fatal only when the ELF header clearly identifies a *different* arch (catches
+# a stale binary or a mis-set --platform); unreadable headers just warn.
+check_elf_arch() {
+  local bin="$1" elf="" want=""
+  command -v file >/dev/null || return 0
+  elf="$(file -b "$bin" 2>/dev/null || true)"
+  case "$PKG_ARCH" in
+    x86_64)   want='x86-64' ;;
+    aarch64)  want='aarch64' ;;
+    armv7)    want='ARM' ;;
+  esac
+  [[ -n "$want" && -n "$elf" ]] || return 0
+  if [[ "$elf" == *"$want"* ]]; then
+    log "arch: $PKG_ARCH ELF confirmed ($(basename "$bin"))"
+    return 0
+  fi
+  case "$elf" in
+    *x86-64*|*80386*|*aarch64*|*ARM*)
+      die "arch mismatch: $bin is '$(echo "$elf" | cut -d, -f2-)', expected $PKG_ARCH" ;;
+  esac
+  log "arch: could not confirm $PKG_ARCH from '$elf'"
+}
+
+# GPU binary: its CUDA/OpenCV closure is worker-provided and deliberately not
+# bundled, so unresolved deps and a failed smoke run are warnings (the worker
+# supplies them), not errors. A foreign ELF is still fatal.
+verify_gpu() {
+  [[ -x "$BIN_GPU" ]] || die "no GPU adapter at $BIN_GPU"
+  log "copied: $BIN_GPU"
+  log "gpu contract: vins_adapter <config.yaml> <output.tum>  (CUDA/OpenCV worker-provided)"
+  check_elf_arch "$BIN_GPU"
+  if host_can_run && command -v ldd >/dev/null; then
+    local missing
+    missing="$(ldd "$BIN_GPU" 2>&1 | grep 'not found' || true)"
+    if [[ -n "$missing" ]]; then
+      warn "GPU binary has unresolved deps -- expected when the worker's CUDA/OpenCV are not on this host:"
+      printf '%s\n' "$missing" >&2
+    else
+      log "gpu standalone: all shared deps resolved ($(ls "$OUT/lib_gpu" 2>/dev/null | wc -l) bundled libs in lib_gpu/)"
+      local rc=0
+      "$BIN_GPU" 2>/dev/null || rc=$?
+      if [[ "$rc" -eq 2 ]]; then
+        log "gpu standalone: smoke run OK"
+      else
+        warn "GPU smoke run exit $rc (expected 2); worker may lack a matching CUDA/OpenCV"
+      fi
+    fi
+  else
+    log "gpu standalone: checks skipped (host $(uname -s)/$(uname -m) cannot execute a linux/$PKG_ARCH ELF)"
   fi
 }
 
@@ -294,12 +392,36 @@ if [[ "$CHECK" -eq 1 ]]; then
   PKG_ARCH="$(arch_to_pkg "$(detect_copy_arch)")"
   [[ -n "$PKG_ARCH" ]] || PKG_ARCH="unknown"
   verify
+  if [[ -x "$BIN_GPU" ]]; then verify_gpu; fi
   exit 0
 fi
 
 command -v docker >/dev/null || die "docker is required on the build host"
 [[ -f "$SCRIPT_DIR/VINS-Fusion/vins_estimator/CMakeLists.txt" ]] \
   || die "local VINS-Fusion checkout not found: $SCRIPT_DIR/VINS-Fusion"
+
+# GPU variant: require the CUDA fork checkout and stage the CUDA-enabled OpenCV
+# into the build context (the Dockerfile COPYs it to /opt/opencv-cuda). The
+# staging dir always exists with a placeholder so the Dockerfile COPY succeeds
+# for CPU-only builds too.
+if [[ "$BUILD_GPU" -eq 1 ]]; then
+  [[ -f "$SCRIPT_DIR/VINS-Fusion-gpu/vins_estimator/CMakeLists.txt" ]] \
+    || die "local VINS-Fusion-gpu checkout not found: $SCRIPT_DIR/VINS-Fusion-gpu"
+  [[ -d "$OPENCV_CUDA" ]] || die "--opencv-cuda: no such directory: $OPENCV_CUDA"
+  if [[ ! -f "$OPENCV_CUDA/OpenCVConfig.cmake" \
+        && ! -f "$OPENCV_CUDA/lib/cmake/opencv4/OpenCVConfig.cmake" \
+        && ! -f "$OPENCV_CUDA/lib64/cmake/opencv4/OpenCVConfig.cmake" ]]; then
+    die "--opencv-cuda: no OpenCVConfig.cmake under $OPENCV_CUDA (not a CUDA-enabled OpenCV?)"
+  fi
+  log "staging CUDA OpenCV: $OPENCV_CUDA -> $SCRIPT_DIR/.opencv-cuda"
+  rm -rf "$SCRIPT_DIR/.opencv-cuda"
+  mkdir -p "$SCRIPT_DIR/.opencv-cuda"
+  cp -a "$OPENCV_CUDA"/. "$SCRIPT_DIR/.opencv-cuda/"
+else
+  mkdir -p "$SCRIPT_DIR/.opencv-cuda"
+  : > "$SCRIPT_DIR/.opencv-cuda/.keep"
+  [[ "$CPU_ONLY" -eq 1 ]] || warn "no --opencv-cuda given: building a CPU-only bundle (GPU variant skipped)"
+fi
 
 # Optional: build on a remote docker daemon over ssh (native arch, no emulation:
 # the amd64-on-arm64 path is ~10-30x slower and memory hungry). The local build
@@ -330,11 +452,13 @@ log "arch: this host $(uname -s | tr '[:upper:]' '[:lower:]')/$(arch_to_pkg "$HO
 
 # 1-3. docker build: conda-forge base + ROS1 noetic + the local VINS-Fusion
 # checkout with our adapter.
-log "building image $IMAGE:$TAG ($PLATFORM, -j${JOBS:-auto})"
+log "building image $IMAGE:$TAG ($PLATFORM, -j${JOBS:-auto}, gpu=$BUILD_GPU)"
 BUILD_ARGS=(
   --platform "$PLATFORM"
   -f "$SCRIPT_DIR/Dockerfile"
   --build-arg "JOBS=$JOBS"
+  --build-arg "BUILD_GPU=$BUILD_GPU"
+  --build-arg "OPENCV_CUDA_DIR=/opt/opencv-cuda"
   -t "$IMAGE:$TAG"
 )
 if [[ "$FORCE" -eq 1 ]]; then
@@ -350,28 +474,86 @@ cleanup() { docker rm -f "$CID" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 # Start from a clean copy: replace only the artifacts this script generates so
 # no stale binary/libs survive into the new self-contained bundle.
-rm -rf "$OUT/lib" "$BIN" "$OUT/BUILDINFO.json"
+rm -rf "$OUT/lib" "$OUT/lib_gpu" "$BIN" "$BIN_GPU" "$OUT/BUILDINFO.json"
 mkdir -p "$OUT"
 docker cp "$CID:/out/vins_adapter" "$BIN"
 docker cp "$CID:/out/lib" "$OUT/lib"
+if [[ "$BUILD_GPU" -eq 1 ]]; then
+  docker cp "$CID:/out/vins_adapter_gpu" "$BIN_GPU"
+  docker cp "$CID:/out/lib_gpu" "$OUT/lib_gpu"
+fi
 docker rm -f "$CID" >/dev/null
 trap - EXIT
 chmod 0755 "$BIN"
+if [[ -f "$BIN_GPU" ]]; then chmod 0755 "$BIN_GPU"; fi
 
-# Launcher wrapper shipped inside the bundle/tarball: execs the binary, which
-# resolves its bundled libraries via $ORIGIN/lib (no ROS/conda install needed).
+# Launcher wrapper shipped inside the bundle/tarball. Picks the GPU or CPU
+# binary, then execs it; each binary resolves its own bundled libs via
+# $ORIGIN/lib (CPU) or $ORIGIN/lib_gpu (GPU), so no ROS/conda install is needed.
 cat > "$OUT/run_vins_adapter.sh" <<'EOF'
 #!/usr/bin/env bash
-# vins_adapter launcher: usage ./run_vins_adapter.sh <config.yaml> <output.tum>
+#
+# vins_adapter launcher:
+#   ./run_vins_adapter.sh [--cpu] <config.yaml> <output.tum>
+#
+# GPU (CUDA) is the default. Falls back to the CPU binary when --cpu is given,
+# or when the GPU binary is absent / no NVIDIA device is usable / its
+# worker-provided CUDA + OpenCV libraries cannot be resolved. The selected
+# binary keeps the `vins_adapter <config.yaml> <output.tum>` contract; the flag
+# is consumed here and never passed on.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$DIR/vins_adapter" "$@"
+
+want_cpu=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    --cpu) want_cpu=1 ;;
+    --gpu) want_cpu=0 ;;
+    *) args+=("$a") ;;
+  esac
+done
+
+if [[ "$want_cpu" -eq 1 ]]; then
+  bin="$DIR/vins_adapter"
+else
+  bin="$DIR/vins_adapter_gpu"
+  reason=""
+  if [[ ! -x "$bin" ]]; then
+    reason="no GPU binary in this bundle"
+  elif ! command -v nvidia-smi >/dev/null 2>&1 && [[ ! -e /dev/nvidiactl ]]; then
+    reason="no NVIDIA device/driver detected"
+  else
+    # CUDA and the CUDA-enabled OpenCV are supplied by the worker, not bundled.
+    # A caller can point at them explicitly via VINS_OPENCV_CUDA_DIR; otherwise
+    # ldconfig / LD_LIBRARY_PATH must already expose them.
+    if [[ -n "${VINS_OPENCV_CUDA_DIR:-}" ]]; then
+      export LD_LIBRARY_PATH="$VINS_OPENCV_CUDA_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+    if command -v ldd >/dev/null 2>&1 \
+       && ldd "$bin" 2>/dev/null | grep -q 'not found'; then
+      reason="GPU binary has unresolved shared libraries (CUDA/OpenCV not found)"
+    fi
+  fi
+  if [[ -n "$reason" ]]; then
+    printf '%s\n' "run_vins_adapter: $reason; falling back to CPU (pass --cpu to silence)" >&2
+    bin="$DIR/vins_adapter"
+  fi
+fi
+
+exec "$bin" ${args[@]+"${args[@]}"}
 EOF
 chmod 0755 "$OUT/run_vins_adapter.sh"
 
 IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG")"
 VINS_COMMIT="$(git -C "$SCRIPT_DIR/VINS-Fusion" rev-parse HEAD 2>/dev/null || echo unknown)"
 VINS_REMOTE="$(git -C "$SCRIPT_DIR/VINS-Fusion" remote get-url origin 2>/dev/null || echo "local snapshot: $SCRIPT_DIR/VINS-Fusion")"
+GPU_JSON=false
+OPENCV_CUDA_JSON=""
+if [[ "$BUILD_GPU" -eq 1 ]]; then
+  GPU_JSON=true
+  OPENCV_CUDA_JSON="$OPENCV_CUDA"
+fi
 cat > "$OUT/BUILDINFO.json" <<JSON
 {
   "target": "vins_adapter",
@@ -383,12 +565,16 @@ cat > "$OUT/BUILDINFO.json" <<JSON
   "docker_platform": "$PLATFORM",
   "arch": "$PKG_ARCH",
   "host_arch": "$(arch_to_pkg "$HOST_ARCH")",
+  "gpu": $GPU_JSON,
+  "gpu_target": "vins_adapter_gpu",
+  "opencv_cuda_dir": "$OPENCV_CUDA_JSON",
   "license": "GPLv3",
   "note": "built locally, never redistributed"
 }
 JSON
 
 verify
+if [[ -x "$BIN_GPU" ]]; then verify_gpu; fi
 
 # Self-contained tarball: binary + bundled libs + launcher + provenance. Drop it
 # on any Linux host of the same arch ($PKG_ARCH) with only glibc and run

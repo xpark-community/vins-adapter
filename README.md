@@ -6,6 +6,10 @@ A self-contained CLI that runs [VINS-Fusion](https://github.com/HKUST-Aerial-Rob
 vins_adapter <config.yaml> <output.tum>
 ```
 
+Built with `--opencv-cuda`, the bundle also carries a CUDA feature-tracking
+binary and the launcher uses it by default (see [Run](#run)); otherwise it is
+CPU-only.
+
 ---
 
 ## Why this exists
@@ -57,12 +61,35 @@ Requires only Docker on the build host. Everything else (ROS1 Noetic via
 RoboStack, Ceres, OpenCV, the VINS-Fusion build) happens inside the image.
 
 ```bash
-./build_vins_adapter.sh                     # -> vins_adapter/, vins_adapter-linux-<arch>.tar.gz
+./build_vins_adapter.sh                     # CPU-only bundle
+./build_vins_adapter.sh --opencv-cuda DIR   # + GPU binary (CUDA-enabled OpenCV at DIR)
+./build_vins_adapter.sh --cpu-only          # explicitly skip the GPU variant
 ./build_vins_adapter.sh --remote user@host  # build on a native docker daemon over ssh
 ./build_vins_adapter.sh --force             # ignore the docker layer cache
 ./build_vins_adapter.sh --check             # verify an already-copied adapter
 ./build_vins_adapter.sh --help              # all options
 ```
+
+### GPU build (`--opencv-cuda`)
+
+GPU is off by default: without `--opencv-cuda` the script builds the CPU bundle
+only. Passing a directory that contains a **CUDA-enabled OpenCV** (either
+`OpenCVConfig.cmake` at the top level or `lib/cmake/opencv4/OpenCVConfig.cmake`)
+adds a second binary, `vins_adapter_gpu`, built from the CUDA fork
+(`VINS-Fusion-gpu/`) in its own catkin workspace. The directory is staged into
+the build context and pointed at with `-DOpenCV_DIR`; it is **not** redistributed
+in the artifact.
+
+> The provided OpenCV must be ABI-compatible with the CPU build's OpenCV
+> (same major.minor, e.g. both 4.x). The CUDA fork's estimator core and the
+> adapter link this OpenCV; RoboStack's `cv_bridge` is not referenced by the
+> adapter's translation units and is dropped by the linker, so a single OpenCV
+> is loaded at runtime.
+
+CUDA and the CUDA-enabled OpenCV are **worker-provided**: the same build the
+`--opencv-cuda` dir pointed at must be available on the GPU worker (via
+`ldconfig`, `LD_LIBRARY_PATH`, or `VINS_OPENCV_CUDA_DIR`). The GPU binary bundles
+only its non-CUDA, non-OpenCV dependencies in `lib_gpu/`.
 
 The build target follows the cpu arch of the machine that compiles, so the
 ELF runs natively there instead of under qemu emulation:
@@ -84,10 +111,12 @@ The build always runs the regression suite at the end; `--skip-tests` opts out.
 
 | path | what |
 | --- | --- |
-| `vins_adapter/vins_adapter` | the Linux ELF binary (`x86_64` or `aarch64`) |
-| `vins_adapter/lib/` | bundled shared-library closure (resolved via `$ORIGIN/lib`) |
-| `vins_adapter/run_vins_adapter.sh` | launcher — use this |
-| `vins_adapter/BUILDINFO.json` | provenance: source commit, image id, platform, arch, build time |
+| `vins_adapter/vins_adapter` | the CPU Linux ELF binary (`x86_64` or `aarch64`) |
+| `vins_adapter/lib/` | CPU bundled shared-library closure (resolved via `$ORIGIN/lib`) |
+| `vins_adapter/vins_adapter_gpu` | the CUDA binary (only with `--opencv-cuda`) |
+| `vins_adapter/lib_gpu/` | GPU binary's non-CUDA, non-OpenCV closure (`$ORIGIN/lib_gpu`) |
+| `vins_adapter/run_vins_adapter.sh` | launcher — use this (picks GPU/CPU, honors `--cpu`) |
+| `vins_adapter/BUILDINFO.json` | provenance: source commit, image id, platform, arch, gpu, build time |
 | `vins_adapter-linux-x86_64.tar.gz` (+ `.md5`) | amd64 bundle for shipping to workers |
 | `vins_adapter-linux-aarch64.tar.gz` (+ `.md5`) | arm64 bundle for shipping to workers |
 
@@ -101,13 +130,22 @@ be told apart without unpacking. Verify a transferred bundle with
 ## Run
 
 ```bash
-./vins_adapter/run_vins_adapter.sh config.yaml trajectory.tum
+./vins_adapter/run_vins_adapter.sh config.yaml trajectory.tum        # GPU by default
+./vins_adapter/run_vins_adapter.sh --cpu config.yaml trajectory.tum  # force CPU
 ```
 
+The launcher uses the **GPU binary by default** and falls back to the CPU binary
+(with a note on stderr) when `--cpu` is passed, when the GPU binary is absent
+(CPU-only bundle), when no NVIDIA device/driver is present, or when its
+worker-provided CUDA/OpenCV libraries cannot be resolved. Point it at those
+libraries with `VINS_OPENCV_CUDA_DIR` (or expose them via `LD_LIBRARY_PATH` /
+`ldconfig`). Both binaries keep the same `vins_adapter <config.yaml>
+<output.tum>` contract; the flag is consumed by the launcher.
+
 Unpacked anywhere on a Linux host of the same arch it was built for
-(x86_64 for the amd64 bundle, aarch64 for the arm64 bundle); it needs nothing
-but glibc. It is a Linux ELF — do not run it on macOS directly (run it inside
-the built image instead).
+(x86_64 for the amd64 bundle, aarch64 for the arm64 bundle); the CPU binary
+needs nothing but glibc. It is a Linux ELF — do not run it on macOS directly
+(run it inside the built image instead).
 
 ### Config yaml
 
@@ -193,9 +231,12 @@ python3 tests/run_tests.py --sources-only               # no build needed
 Two layers: **source guards** (the fixes that keep the adapter running
 standalone must not be reverted — camodocal `%YAML:1.0` header, no
 `TransformBroadcaster` in `pubTF`, `-DNDEBUG`, zero-initialized estimator state,
-`ESTIMATE_EXTRINSIC` forced off without IMU) and **functional runs** (argv
+`ESTIMATE_EXTRINSIC` forced off without IMU — checked in both the CPU and CUDA
+forks, plus the `VINS_GPU` guard in the adapter) and **functional runs** (argv
 contract, config error paths, undecodable frames, temp-dir cleanup, TUM output
-validity, clean exit on untrackable input). Standard library only.
+validity, clean exit on untrackable input, and `--cpu` selection). A direct GPU
+run is exercised when the bundle has a GPU binary and the worker CUDA/OpenCV
+happen to be loadable; otherwise it skips cleanly. Standard library only.
 
 ---
 
@@ -207,6 +248,13 @@ VINS-Fusion from the **local checkout** in `VINS-Fusion/` (no network clone;
 update that checkout to build a different snapshot) → the adapter added to the
 `vins_estimator` package so the unexported `vins_lib` target is directly
 linkable.
+
+The GPU build adds a **second catkin workspace** (`/ws_gpu`): `VINS-Fusion-gpu/`
+reuses the CPU fork's catkin package names (`camera_models`, `vins`), so it
+cannot share `/ws`. It is configured with `-DVINS_GPU=ON` (builds
+`vins_adapter_gpu` and defines `VINS_GPU` for the shared adapter source) and
+`-DOpenCV_DIR=<staged CUDA OpenCV>`, and is bundled into `/out/lib_gpu` with the
+CUDA/OpenCV closure deliberately excluded.
 
 Pinned because the fork is c++11 and the toolchain is not: Ceres 2.1 (2.2
 removed `ceres::LocalParameterization`), Eigen 3.4 (Ceres 2.1's
@@ -225,9 +273,10 @@ and every already-bundled lib until the set stops growing.
 adapter/vins_adapter.cpp    the offline front-end (contract doc is in its header comment)
 adapter/adapter.cmake       appended to vins_estimator/CMakeLists.txt by the Dockerfile
 build_vins_adapter.sh       build + extract + verify + bundle + test
-Dockerfile                  pinned ROS1/VINS-Fusion toolchain
+Dockerfile                  pinned ROS1/VINS-Fusion toolchain (CPU + optional GPU)
 tests/run_tests.py          regression suite
-VINS-Fusion/                vendored upstream checkout (GPLv3)
+VINS-Fusion/                vendored upstream checkout (GPLv3; CPU, patched)
+VINS-Fusion-gpu/            vendored CUDA fork (GPLv3; built with --opencv-cuda)
 ```
 
 ---

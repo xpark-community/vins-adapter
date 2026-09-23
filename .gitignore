@@ -176,5 +176,8 @@ pyrightconfig.json
 .codebuddy
 .soothe
 vins_adapter
+# CUDA-enabled OpenCV staged into the docker build context by
+# build_vins_adapter.sh --opencv-cuda (see the Dockerfile GPU section).
+.opencv-cuda/
 vins_adapter.tar.gz
 vins_adapter.tar.gz.md5

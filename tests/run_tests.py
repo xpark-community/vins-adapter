@@ -47,6 +47,10 @@ ADAPTER_CPP = REPO / "adapter" / "vins_adapter.cpp"
 ESTIMATOR_H = REPO / "VINS-Fusion" / "vins_estimator" / "src" / "estimator" / "estimator.h"
 VISUALIZATION_CPP = REPO / "VINS-Fusion" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
 VINS_CMAKELISTS = REPO / "VINS-Fusion" / "vins_estimator" / "CMakeLists.txt"
+# The CUDA fork carries its own copies of the adapter-critical fixes.
+GPU_ESTIMATOR_H = REPO / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "estimator" / "estimator.h"
+GPU_VISUALIZATION_CPP = REPO / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
+GPU_VINS_CMAKELISTS = REPO / "VINS-Fusion-gpu" / "vins_estimator" / "CMakeLists.txt"
 DEFAULT_ADAPTER = REPO / "vins_adapter" / "run_vins_adapter.sh"
 
 WIDTH, HEIGHT, FPS, N_FRAMES = 320, 240, 30, 12
@@ -210,12 +214,72 @@ def test_source_guards() -> None:
     )
 
 
+def test_gpu_source_guards() -> None:
+    section("GPU source guards (same fixes present in VINS-Fusion-gpu)")
+
+    # The adapter locks estimator.mProcess, so the CUDA fork must declare it.
+    est = GPU_ESTIMATOR_H.read_text(encoding="utf-8")
+    check(
+        "gpu: std::mutex mProcess declared",
+        "std::mutex mProcess;" in est,
+        "adapter/vins_adapter.cpp locks estimator.mProcess around the pose read",
+    )
+    check(
+        "gpu: pre_integrations zero-initialized",
+        "pre_integrations[(WINDOW_SIZE + 1)] = {};" in est,
+        "uninitialized pointers dereferenced/freed across runs -> segfault",
+    )
+    check(
+        "gpu: tmp_pre_integration initialized",
+        "IntegrationBase *tmp_pre_integration = nullptr;" in est,
+        "uninitialized pointer -> segfault",
+    )
+    check(
+        "gpu: last_marginalization_info initialized",
+        "MarginalizationInfo *last_marginalization_info = nullptr;" in est,
+        "uninitialized pointer -> segfault",
+    )
+
+    vis = GPU_VISUALIZATION_CPP.read_text(encoding="utf-8")
+    pubtf_start = vis.find("void pubTF")
+    pubtf_end = vis.find("\n}", pubtf_start)
+    pubtf = vis[pubtf_start:pubtf_end]
+    ret = pubtf.find("    return;")
+    br = pubtf.find("static tf::TransformBroadcaster")
+    check(
+        "gpu: pubTF returns before constructing a TransformBroadcaster",
+        ret != -1 and br != -1 and ret < br,
+        "processMeasurements() calls pubTF synchronously; without the early "
+        "return the adapter hangs in the master XMLRPC retry loop",
+    )
+
+    cmake = GPU_VINS_CMAKELISTS.read_text(encoding="utf-8")
+    check(
+        "gpu: estimator built with -DNDEBUG",
+        "-DNDEBUG" in cmake,
+        "without NDEBUG the GPU build aborts on unadvertised publish() calls",
+    )
+    check(
+        "gpu: OpenCV found via find_package, not a hardcoded path",
+        "find_package(OpenCV REQUIRED)" in cmake and "/home/dji/opencv" not in cmake,
+        "the build supplies the CUDA OpenCV with -DOpenCV_DIR=...",
+    )
+
+    src = ADAPTER_CPP.read_text(encoding="utf-8")
+    check(
+        "adapter enables the GPU tracker under VINS_GPU",
+        "#ifdef VINS_GPU" in src and "USE_GPU = 1;" in src and "USE_GPU_ACC_FLOW = 1;" in src,
+        "the GPU fork's USE_GPU/USE_GPU_ACC_FLOW globals must be on for the "
+        "GPU binary, guarded so the CPU fork (which lacks them) still compiles",
+    )
+
+
 # ----------------------------------------------------------- functional tests
 
 
-def run_adapter(adapter: str, config: Path, out: Path, timeout: float = 240.0):
+def run_adapter(adapter: str, config: Path, out: Path, flags: tuple[str, ...] = (), timeout: float = 240.0):
     return subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        [adapter, str(config), str(out)],
+        [adapter, *flags, str(config), str(out)],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -343,6 +407,51 @@ def test_functional(adapter: str) -> None:
             if proc.returncode == 0:
                 assert_valid_tum(name, tum, allow_empty=True)
             check(f"{name}: scratch dir cleaned up", tmp_dir_count() <= before, f"after={tmp_dir_count()}")
+
+        # --cpu must select the CPU binary through the launcher and behave like
+        # the default (which is the GPU binary whenever it is usable).
+        cfg = work / "mono_vision_only.yaml"
+        tum = work / "mono_cpu.tum"
+        proc = run_adapter(adapter, cfg, tum, flags=("--cpu",))
+        check("launcher --cpu: exits 0", proc.returncode == 0, f"exit={proc.returncode} stderr={proc.stderr[-200:]!r}")
+        if proc.returncode == 0:
+            assert_valid_tum("mono_cpu", tum, allow_empty=True)
+
+        # --cpu with no positional args is still a usage error (exit 2).
+        proc = subprocess.run([adapter, "--cpu"], capture_output=True, text=True)  # noqa: S603
+        check("launcher --cpu: no args exits 2", proc.returncode == 2, f"exit={proc.returncode}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_gpu_functional(adapter: str) -> None:
+    section("GPU functional (best-effort: skipped when worker CUDA/OpenCV absent)")
+    gpu_bin = Path(adapter).resolve().parent / "vins_adapter_gpu"
+    if not (gpu_bin.is_file() and os.access(gpu_bin, os.X_OK)):
+        print("  SKIP no GPU binary next to the launcher (CPU-only bundle)")
+        return
+
+    work = Path(tempfile.mkdtemp(prefix="vins_adapter_gpu_tests_"))
+    try:
+        frames = work / "mono"
+        write_frames(frames, N_FRAMES)
+        cfg = work / "gpu.yaml"
+        write_config(cfg, frames)
+        tum = work / "gpu.tum"
+        proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            [str(gpu_bin), str(cfg), str(tum)],
+            capture_output=True,
+            text=True,
+            timeout=240.0,
+        )
+        if "error while loading shared libraries" in proc.stderr:
+            # The GPU binary's CUDA/OpenCV are worker-provided and not bundled;
+            # a build host without them cannot run it directly. Not a failure.
+            print("  SKIP GPU binary cannot load (worker CUDA/OpenCV not present on this host)")
+            return
+        check("gpu direct run: exits 0", proc.returncode == 0, f"exit={proc.returncode} stderr={proc.stderr[-200:]!r}")
+        if proc.returncode == 0:
+            assert_valid_tum("gpu_mono", tum, allow_empty=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -353,14 +462,24 @@ def main() -> int:
     ap.add_argument("--sources-only", action="store_true", help="skip the functional (subprocess) tests")
     args = ap.parse_args()
 
-    for path in (ADAPTER_CPP, ESTIMATOR_H, VISUALIZATION_CPP, VINS_CMAKELISTS):
+    for path in (
+        ADAPTER_CPP,
+        ESTIMATOR_H,
+        VISUALIZATION_CPP,
+        VINS_CMAKELISTS,
+        GPU_ESTIMATOR_H,
+        GPU_VISUALIZATION_CPP,
+        GPU_VINS_CMAKELISTS,
+    ):
         if not path.is_file():
             print(f"source file missing: {path}", file=sys.stderr)
             return 2
 
     test_source_guards()
+    test_gpu_source_guards()
     if not args.sources_only:
         test_functional(args.adapter)
+        test_gpu_functional(args.adapter)
 
     print(f"\n{passed} passed, {len(failures)} failed")
     for f in failures:
