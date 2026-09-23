@@ -31,9 +31,10 @@
 #                     (they run automatically on every build; also runnable
 #                     standalone: python3 tests/run_tests.py --sources-only)
 #
-# VINS-Fusion is taken from the local checkout at vins-adapter/VINS-Fusion
-# (no network clone at build time); update that checkout to build a different
-# snapshot.
+# VINS-Fusion is bundled as plain source at vins-adapter/thirdparty/VINS-Fusion
+# (no network clone at build time); edit that source directly to adapt it to
+# the adapter. The bundled tree already carries the adapter's local fixes on
+# top of the pinned upstream snapshot (see thirdparty/README.md).
 #
 # Why Docker
 # ----------
@@ -72,7 +73,7 @@
 #
 #       Reads the flat config yaml (camera intrinsics, T_cam0_body /
 #       T_cam1_body, left_dir, right_dir, optional imu_csv and
-#       frame_times_csv -- keys documented in adapter/vins_adapter.cpp), runs
+#       frame_times_csv -- keys documented in src/vins_adapter.cpp), runs
 #       the estimator, and writes a TUM trajectory:
 #           timestamp tx ty tz qx qy qz qw        (seconds, one line per frame)
 #       Exit non-zero with a message on stderr when the run fails.
@@ -397,16 +398,16 @@ if [[ "$CHECK" -eq 1 ]]; then
 fi
 
 command -v docker >/dev/null || die "docker is required on the build host"
-[[ -f "$SCRIPT_DIR/VINS-Fusion/vins_estimator/CMakeLists.txt" ]] \
-  || die "local VINS-Fusion checkout not found: $SCRIPT_DIR/VINS-Fusion"
+[[ -f "$SCRIPT_DIR/thirdparty/VINS-Fusion/vins_estimator/CMakeLists.txt" ]] \
+  || die "bundled VINS-Fusion source not found: $SCRIPT_DIR/thirdparty/VINS-Fusion"
 
 # GPU variant: require the CUDA fork checkout and stage the CUDA-enabled OpenCV
 # into the build context (the Dockerfile COPYs it to /opt/opencv-cuda). The
 # staging dir always exists with a placeholder so the Dockerfile COPY succeeds
 # for CPU-only builds too.
 if [[ "$BUILD_GPU" -eq 1 ]]; then
-  [[ -f "$SCRIPT_DIR/VINS-Fusion-gpu/vins_estimator/CMakeLists.txt" ]] \
-    || die "local VINS-Fusion-gpu checkout not found: $SCRIPT_DIR/VINS-Fusion-gpu"
+  [[ -f "$SCRIPT_DIR/thirdparty/VINS-Fusion-gpu/vins_estimator/CMakeLists.txt" ]] \
+    || die "bundled VINS-Fusion-gpu source not found: $SCRIPT_DIR/thirdparty/VINS-Fusion-gpu"
   [[ -d "$OPENCV_CUDA" ]] || die "--opencv-cuda: no such directory: $OPENCV_CUDA"
   if [[ ! -f "$OPENCV_CUDA/OpenCVConfig.cmake" \
         && ! -f "$OPENCV_CUDA/lib/cmake/opencv4/OpenCVConfig.cmake" \
@@ -546,8 +547,13 @@ EOF
 chmod 0755 "$OUT/run_vins_adapter.sh"
 
 IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG")"
-VINS_COMMIT="$(git -C "$SCRIPT_DIR/VINS-Fusion" rev-parse HEAD 2>/dev/null || echo unknown)"
-VINS_REMOTE="$(git -C "$SCRIPT_DIR/VINS-Fusion" remote get-url origin 2>/dev/null || echo "local snapshot: $SCRIPT_DIR/VINS-Fusion")"
+# Provenance: the bundled source is no longer a git checkout, so the pinned
+# upstream commit/url come from thirdparty/upstream.txt.
+UPSTREAM_PINS="$SCRIPT_DIR/thirdparty/upstream.txt"
+VINS_COMMIT="$(awk '$1 == "VINS-Fusion" {print $2}' "$UPSTREAM_PINS" 2>/dev/null || true)"
+VINS_REMOTE="$(awk '$1 == "VINS-Fusion" {print $3}' "$UPSTREAM_PINS" 2>/dev/null || true)"
+[[ -n "$VINS_COMMIT" ]] || VINS_COMMIT="unknown"
+[[ -n "$VINS_REMOTE" ]] || VINS_REMOTE="bundled snapshot: $SCRIPT_DIR/thirdparty/VINS-Fusion"
 GPU_JSON=false
 OPENCV_CUDA_JSON=""
 if [[ "$BUILD_GPU" -eq 1 ]]; then

@@ -43,14 +43,17 @@ import zlib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-ADAPTER_CPP = REPO / "adapter" / "vins_adapter.cpp"
-ESTIMATOR_H = REPO / "VINS-Fusion" / "vins_estimator" / "src" / "estimator" / "estimator.h"
-VISUALIZATION_CPP = REPO / "VINS-Fusion" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
-VINS_CMAKELISTS = REPO / "VINS-Fusion" / "vins_estimator" / "CMakeLists.txt"
+ADAPTER_CPP = REPO / "src" / "vins_adapter.cpp"
+ADAPTER_SPEC_H = REPO / "src" / "adapter_spec.h"
+# The VINS-Fusion sources are bundled (no submodules) under thirdparty/.
+_THIRDPARTY = REPO / "thirdparty"
+ESTIMATOR_H = _THIRDPARTY / "VINS-Fusion" / "vins_estimator" / "src" / "estimator" / "estimator.h"
+VISUALIZATION_CPP = _THIRDPARTY / "VINS-Fusion" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
+VINS_CMAKELISTS = _THIRDPARTY / "VINS-Fusion" / "vins_estimator" / "CMakeLists.txt"
 # The CUDA fork carries its own copies of the adapter-critical fixes.
-GPU_ESTIMATOR_H = REPO / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "estimator" / "estimator.h"
-GPU_VISUALIZATION_CPP = REPO / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
-GPU_VINS_CMAKELISTS = REPO / "VINS-Fusion-gpu" / "vins_estimator" / "CMakeLists.txt"
+GPU_ESTIMATOR_H = _THIRDPARTY / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "estimator" / "estimator.h"
+GPU_VISUALIZATION_CPP = _THIRDPARTY / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
+GPU_VINS_CMAKELISTS = _THIRDPARTY / "VINS-Fusion-gpu" / "vins_estimator" / "CMakeLists.txt"
 DEFAULT_ADAPTER = REPO / "vins_adapter" / "run_vins_adapter.sh"
 
 WIDTH, HEIGHT, FPS, N_FRAMES = 320, 240, 30, 12
@@ -159,9 +162,12 @@ def test_source_guards() -> None:
     section("source guards (regression fixes present)")
 
     src = ADAPTER_CPP.read_text(encoding="utf-8")
-    fn_start = src.find("void write_camodocal_pinhole")
-    fn_end = src.find("\n}", fn_start)
-    body = src[fn_start:fn_end]
+    # The camodocal writer and the extrinsic gate live in the spec header
+    # (unit tested by tests/test_adapter_spec.cpp).
+    spec = ADAPTER_SPEC_H.read_text(encoding="utf-8")
+    fn_start = spec.find("void write_camodocal_pinhole")
+    fn_end = spec.find("\n}", fn_start)
+    body = spec[fn_start:fn_end]
     check(
         "camodocal yaml carries the %YAML:1.0 header",
         "%YAML:1.0" in body,
@@ -170,7 +176,7 @@ def test_source_guards() -> None:
     )
     check(
         "ESTIMATE_EXTRINSIC forced off without IMU",
-        "ESTIMATE_EXTRINSIC = use_imu ? estimate_extrinsic : 0;" in src,
+        "c.estimate_extrinsic = c.use_imu ? estimate_extrinsic : 0;" in spec,
         "null pre_integrations deref in processImage (estimator.cpp "
         "ESTIMATE_EXTRINSIC == 2 branch) for vision-only runs",
     )
@@ -222,7 +228,7 @@ def test_gpu_source_guards() -> None:
     check(
         "gpu: std::mutex mProcess declared",
         "std::mutex mProcess;" in est,
-        "adapter/vins_adapter.cpp locks estimator.mProcess around the pose read",
+        "src/vins_adapter.cpp locks estimator.mProcess around the pose read",
     )
     check(
         "gpu: pre_integrations zero-initialized",
@@ -464,6 +470,7 @@ def main() -> int:
 
     for path in (
         ADAPTER_CPP,
+        ADAPTER_SPEC_H,
         ESTIMATOR_H,
         VISUALIZATION_CPP,
         VINS_CMAKELISTS,

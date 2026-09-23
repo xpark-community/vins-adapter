@@ -1,6 +1,0 @@
-[submodule "VINS-Fusion"]
-	path = VINS-Fusion
-	url = https://github.com/HKUST-Aerial-Robotics/VINS-Fusion.git
-[submodule "VINS-Fusion-gpu"]
-	path = VINS-Fusion-gpu
-	url = https://github.com/pjrambo/VINS-Fusion-gpu.git

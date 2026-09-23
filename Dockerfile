@@ -6,7 +6,7 @@
 #   2. ROS1 Noetic via RoboStack (conda-forge) -- the only maintained binary
 #      distribution of ROS1 for jammy: official ROS1 apt support stops at
 #      Ubuntu 20.04 and the third-party jammy apt ports have been taken down.
-#   3. VINS-Fusion from source (local checkout at vins-adapter/VINS-Fusion,
+#   3. VINS-Fusion from source (bundled at vins-adapter/thirdparty/VINS-Fusion,
 #      built with catkin) with the adapter main added to its vins_estimator
 #      package.
 #   4. The adapter binary plus its non-glibc shared libraries land in /out/
@@ -70,10 +70,11 @@ RUN /opt/conda/bin/conda create -y -p /opt/ros1 \
 
 WORKDIR /ws/src
 
-# Copy the local VINS-Fusion checkout into the image and patch it for gcc-11
+# Copy the bundled VINS-Fusion source into the image and patch it for gcc-11
 # (c++14 keeps the fork's c++11 sources compatible with the ceres 2.1
-# headers). .git is excluded via .dockerignore.
-COPY VINS-Fusion/ /ws/src/VINS-Fusion/
+# headers). The bundled tree carries the adapter's local fixes (see
+# thirdparty/README.md); the sed patches below are toolchain-only.
+COPY thirdparty/VINS-Fusion/ /ws/src/VINS-Fusion/
 # Patch for the build toolchain: c++14 (gcc-11 + ceres 2.1) and modern OpenCV
 # constants (4.13 dropped the C-style CV_* macros used by the calibration
 # tools in camera_models and the file readers in vins_estimator).
@@ -107,8 +108,9 @@ RUN sed -i 's/-std=c++11/-std=c++14/g' \
 
 # Add the adapter to the fork's vins_estimator package (same package, so the
 # unexported vins_lib target is directly linkable) and wire it into the build.
-COPY adapter/vins_adapter.cpp VINS-Fusion/vins_estimator/src/adapter_main.cpp
-COPY adapter/adapter.cmake VINS-Fusion/vins_estimator/adapter.cmake
+COPY src/vins_adapter.cpp VINS-Fusion/vins_estimator/src/adapter_main.cpp
+COPY src/adapter_spec.h VINS-Fusion/vins_estimator/src/adapter_spec.h
+COPY src/adapter.cmake VINS-Fusion/vins_estimator/adapter.cmake
 RUN echo "include(adapter.cmake)" >> VINS-Fusion/vins_estimator/CMakeLists.txt
 
 # Build only the packages the adapter needs: camera_models + vins (estimator
@@ -153,6 +155,20 @@ RUN source /opt/conda/etc/profile.d/conda.sh && conda activate /opt/ros1 \
     && for f in /out/lib/*; do patchelf --set-rpath '$ORIGIN' "$f"; done
 
 # ---------------------------------------------------------------------------
+# Adapter-spec unit tests: the in/out contract in src/adapter_spec.h (locked
+# by tests/test_adapter_spec.cpp) must hold for every adapter build. Eigen +
+# yaml-cpp already live in /opt/ros1, g++ is from apt; the suite is tiny.
+# Fails the image build on any regression.
+COPY src/adapter_spec.h /utest/adapter_spec.h
+COPY tests/test_adapter_spec.cpp /utest/test_adapter_spec.cpp
+RUN cd /utest \
+    && g++ -std=c++17 -O1 -Wall -Wextra \
+        -I/opt/ros1/include/eigen3 -I/opt/ros1/include \
+        test_adapter_spec.cpp -o test_adapter_spec \
+        -L/opt/ros1/lib -lyaml-cpp -Wl,-rpath,/opt/ros1/lib \
+    && ./test_adapter_spec
+
+# ---------------------------------------------------------------------------
 # GPU variant (optional, BUILD_GPU=1). A SECOND catkin workspace is required:
 # the CUDA fork reuses the CPU fork's catkin package names (camera_models,
 # vins), so it cannot share /ws. The CUDA-enabled OpenCV is staged into the
@@ -162,7 +178,7 @@ RUN source /opt/conda/etc/profile.d/conda.sh && conda activate /opt/ros1 \
 COPY .opencv-cuda/ /opt/opencv-cuda/
 
 WORKDIR /ws_gpu/src
-COPY VINS-Fusion-gpu/ /ws_gpu/src/VINS-Fusion-gpu/
+COPY thirdparty/VINS-Fusion-gpu/ /ws_gpu/src/VINS-Fusion-gpu/
 # Same toolchain patches as the CPU fork: c++14 (gcc-11 + ceres 2.1) and
 # modern OpenCV constants.
 RUN sed -i 's/-std=c++11/-std=c++14/g' \
@@ -193,8 +209,9 @@ RUN sed -i 's/-std=c++11/-std=c++14/g' \
         -e 's/\bCV_LOAD_IMAGE_GRAYSCALE\b/cv::IMREAD_GRAYSCALE/g' \
         -e 's/\bCV_LOAD_IMAGE_COLOR\b/cv::IMREAD_COLOR/g'
 
-COPY adapter/vins_adapter.cpp VINS-Fusion-gpu/vins_estimator/src/adapter_main.cpp
-COPY adapter/adapter.cmake VINS-Fusion-gpu/vins_estimator/adapter.cmake
+COPY src/vins_adapter.cpp VINS-Fusion-gpu/vins_estimator/src/adapter_main.cpp
+COPY src/adapter_spec.h VINS-Fusion-gpu/vins_estimator/src/adapter_spec.h
+COPY src/adapter.cmake VINS-Fusion-gpu/vins_estimator/adapter.cmake
 RUN echo "include(adapter.cmake)" >> VINS-Fusion-gpu/vins_estimator/CMakeLists.txt
 
 # Fail fast when a GPU build was requested but the staged OpenCV is missing or

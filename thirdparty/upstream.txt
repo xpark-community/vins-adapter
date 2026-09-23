@@ -1,0 +1,6 @@
+# Pinned upstream snapshots bundled under thirdparty/ (formerly git submodules).
+# Format: <dir> <upstream-commit> <upstream-url>
+# The bundled trees carry the adapter's local fixes on top of these snapshots;
+# see README.md in this directory for the list of patched files.
+VINS-Fusion be55a937a57436548ddfb1bd324bc1e9a9e828e0 https://github.com/HKUST-Aerial-Robotics/VINS-Fusion.git
+VINS-Fusion-gpu 9ec9283d9d2348df05d99ed05bb8ecd8e4687efc https://github.com/pjrambo/VINS-Fusion-gpu.git

@@ -76,7 +76,7 @@ GPU is off by default: without `--opencv-cuda` the script builds the CPU bundle
 only. Passing a directory that contains a **CUDA-enabled OpenCV** (either
 `OpenCVConfig.cmake` at the top level or `lib/cmake/opencv4/OpenCVConfig.cmake`)
 adds a second binary, `vins_adapter_gpu`, built from the CUDA fork
-(`VINS-Fusion-gpu/`) in its own catkin workspace. The directory is staged into
+(`thirdparty/VINS-Fusion-gpu/`) in its own catkin workspace. The directory is staged into
 the build context and pointed at with `-DOpenCV_DIR`; it is **not** redistributed
 in the artifact.
 
@@ -223,12 +223,20 @@ failure.
 ## Tests
 
 ```bash
+tests/run_cpp_tests.sh                                  # C++ unit tests (needs Eigen + yaml-cpp)
 python3 tests/run_tests.py                              # against vins_adapter/run_vins_adapter.sh
 python3 tests/run_tests.py --adapter /path/to/binary
 python3 tests/run_tests.py --sources-only               # no build needed
 ```
 
-Two layers: **source guards** (the fixes that keep the adapter running
+Three layers. **Unit tests** (`tests/test_adapter_spec.cpp`, C++17, Eigen +
+yaml-cpp only — no ROS/OpenCV): the adapter's in/out contract lives in
+`src/adapter_spec.h` (config resolution with its defaults/gates/clamps, image
+directory discovery, imu/frame-times csv parsing, the exact camodocal yaml
+bytes, the exact TUM line format and the pose emission gate) and every piece of
+it is pinned by these tests; the Dockerfile also builds and runs the suite on
+every adapter build, and `tests/run_cpp_tests.sh` runs it on the host (or in
+the pinned image). **Source guards** (the fixes that keep the adapter running
 standalone must not be reverted — camodocal `%YAML:1.0` header, no
 `TransformBroadcaster` in `pubTF`, `-DNDEBUG`, zero-initialized estimator state,
 `ESTIMATE_EXTRINSIC` forced off without IMU — checked in both the CPU and CUDA
@@ -236,7 +244,77 @@ forks, plus the `VINS_GPU` guard in the adapter) and **functional runs** (argv
 contract, config error paths, undecodable frames, temp-dir cleanup, TUM output
 validity, clean exit on untrackable input, and `--cpu` selection). A direct GPU
 run is exercised when the bundle has a GPU binary and the worker CUDA/OpenCV
-happen to be loadable; otherwise it skips cleanly. Standard library only.
+happen to be loadable; otherwise it skips cleanly. The python layers need the
+standard library only.
+
+---
+
+## Benchmarks (CPU vs GPU)
+
+Measures the wall-clock gain of the CUDA binary (`vins_adapter_gpu`, built with
+`--opencv-cuda`) over the CPU binary on the same episode:
+
+```bash
+python3 benchmarks/benchmark_cpu_gpu.py                    # synthetic stereo episode
+python3 benchmarks/benchmark_cpu_gpu.py --mono             # monocular
+python3 benchmarks/benchmark_cpu_gpu.py --config real.yaml # benchmark a real episode
+python3 benchmarks/benchmark_cpu_gpu.py --json bench.json  # machine-readable results
+```
+
+What it does: generates (or takes, via `--config`) a trackable episode, runs
+each binary with a warmup pass (CUDA context/library init) plus `--runs` timed
+runs, and reports min/median/mean wall time, frames/s, the CPU→GPU speedup, and
+a trajectory cross-check (matched-timestamp translation RMSE and max rotation
+difference — GPU and CPU differ in floating-point numerics, so this is expected
+to be small but nonzero). The GPU side is skipped with a reason when the bundle
+has no GPU binary or the worker's CUDA/OpenCV cannot load it (pass
+`--require-gpu` to make that fatal); `VINS_OPENCV_CUDA_DIR` is honored like the
+launcher does. Standard library only; the synthetic episode is cached under the
+system temp dir (`--workdir` / `--regen` to control).
+
+Run it on the worker the bundle was shipped to — it is a Linux ELF, and the GPU
+numbers only exist where a CUDA device and the matching CUDA/OpenCV build are
+present.
+
+### Real dataset: EuRoC MAV (reproducible experiment)
+
+For a reproducible benchmark on real data use the [EuRoC MAV dataset](https://projects.asl.ethz.ch/datasets/euroc-mav/)
+(Burri et al., IJRR 2016 — free for research use, please cite). It is the
+canonical VINS-Fusion benchmark and maps 1:1 onto the adapter's contract:
+stereo 752x480 global-shutter PNG dirs, pinhole + radtan distortion (the
+adapter's exact camera model), 200 Hz IMU csv in the gyro-first order the
+adapter reads, and `T_BS` in `sensor.yaml` is already the `T_cam{i}_body`
+convention.
+
+```bash
+# one command: download (~1-2.5 GB/sequence) + extract + generate the config
+python3 benchmarks/prepare_euroc.py --download MH_01_easy --datasets ~/datasets/euroc
+
+# or prepare an already-downloaded sequence
+python3 benchmarks/prepare_euroc.py ~/datasets/euroc/MH_01_easy --with-gt
+
+# then benchmark it
+python3 benchmarks/benchmark_cpu_gpu.py --config ~/datasets/euroc/MH_01_easy/config.yaml --runs 3
+```
+
+`prepare_euroc.py` converts only what needs converting (IMU ns→s,
+`frame_times.csv` from the timestamped filenames, optional ground truth to
+TUM with the qw→q-last fix); frames are referenced in place, never copied.
+Sequences: `MH_01_easy` … `V2_03_difficult` (11 total); the texture-rich
+`MH_*` machine-hall sequences give the tracker the heaviest, most
+GPU-relevant load. Downloads come from the ETH Research Collection (the
+official host since the old `robotics.ethz.ch` server was retired) — it
+rate-limits bursts hard (HTTP 429), so fetch one sequence at a time.
+
+Alternatives, and why not:
+
+- **TUM-VI** (CC BY 4.0, EuRoC-format exports at
+  `https://cdn3.vision.in.tum.de/tumvi/exported/euroc/512_16/`): wide-FOV
+  lenses with an equidistant/omni distortion model — incompatible with the
+  adapter's pinhole+radtan camodocal model, so tracking would degrade. Not
+  recommended for this benchmark.
+- **KITTI Odometry** (stereo PNG dirs, no IMU — vision-only runs): usable
+  with a hand-written config, but downloads require a registration form.
 
 ---
 
@@ -244,12 +322,14 @@ happen to be loadable; otherwise it skips cleanly. Standard library only.
 
 `ubuntu:22.04` + Miniforge → ROS1 Noetic from [RoboStack](https://robostack.github.io/)
 (official ROS1 stops at 20.04 and the third-party jammy apt ports are gone) →
-VINS-Fusion from the **local checkout** in `VINS-Fusion/` (no network clone;
-update that checkout to build a different snapshot) → the adapter added to the
+VINS-Fusion from the **bundled source** in `thirdparty/VINS-Fusion/` (no
+network clone; edit that source directly to adapt it to the adapter — it
+already carries the adapter's local fixes on top of the pinned upstream
+snapshot) → the adapter added to the
 `vins_estimator` package so the unexported `vins_lib` target is directly
 linkable.
 
-The GPU build adds a **second catkin workspace** (`/ws_gpu`): `VINS-Fusion-gpu/`
+The GPU build adds a **second catkin workspace** (`/ws_gpu`): `thirdparty/VINS-Fusion-gpu/`
 reuses the CPU fork's catkin package names (`camera_models`, `vins`), so it
 cannot share `/ws`. It is configured with `-DVINS_GPU=ON` (builds
 `vins_adapter_gpu` and defines `VINS_GPU` for the shared adapter source) and
@@ -260,7 +340,7 @@ Pinned because the fork is c++11 and the toolchain is not: Ceres 2.1 (2.2
 removed `ceres::LocalParameterization`), Eigen 3.4 (Ceres 2.1's
 `find_package(Eigen3 3.4.0)` rejects the Eigen 5 version scheme), CMake <4.
 Source fixes for gcc-11 / OpenCV 4.13 (c++14, `CV_*` → `cv::*`) are applied
-with `sed` **inside the image**, so the vendored checkout stays pristine.
+with `sed` **inside the image**, so the bundled source stays pristine.
 
 Bundling is iterative, not a single `ldd` pass: conda's `blas`/`cblas` are
 symlink aliases of `libopenblas` and the loader dedupes by SONAME, so those
@@ -270,13 +350,21 @@ and every already-bundled lib until the set stops growing.
 ## Repo layout
 
 ```
-adapter/vins_adapter.cpp    the offline front-end (contract doc is in its header comment)
-adapter/adapter.cmake       appended to vins_estimator/CMakeLists.txt by the Dockerfile
+src/vins_adapter.cpp        the offline front-end (contract doc is in its header comment)
+src/adapter_spec.h          the in/out spec, unit-testable without ROS/OpenCV
+src/adapter.cmake           appended to vins_estimator/CMakeLists.txt by the Dockerfile
 build_vins_adapter.sh       build + extract + verify + bundle + test
 Dockerfile                  pinned ROS1/VINS-Fusion toolchain (CPU + optional GPU)
 tests/run_tests.py          regression suite
-VINS-Fusion/                vendored upstream checkout (GPLv3; CPU, patched)
-VINS-Fusion-gpu/            vendored CUDA fork (GPLv3; built with --opencv-cuda)
+tests/test_adapter_spec.cpp C++ unit tests for the in/out spec
+tests/run_cpp_tests.sh      build + run the unit tests (host or pinned image)
+benchmarks/benchmark_cpu_gpu.py   CPU vs GPU performance benchmark
+benchmarks/prepare_euroc.py       EuRoC dataset download + adapter config generator
+thirdparty/
+  VINS-Fusion/              bundled upstream source (GPLv3; CPU, patched)
+  VINS-Fusion-gpu/          bundled CUDA fork (GPLv3; built with --opencv-cuda)
+  README.md                 provenance: pinned upstream commits + patched files
+  upstream.txt              machine-readable pinning table (BUILDINFO source)
 ```
 
 ---
@@ -329,5 +417,5 @@ reason ROS1 Noetic is installable on a maintained Ubuntu LTS.
 
 VINS-Fusion is **GPLv3**, and the adapter links against it, so this project is
 distributed under **GPLv3** as well (see `LICENSE`, and
-`VINS-Fusion/LICENSE` for upstream). The binary is built locally and never
+`thirdparty/VINS-Fusion/LICENSE` for upstream). The binary is built locally and never
 redistributed; it carries the GPL with it.
