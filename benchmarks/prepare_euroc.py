@@ -133,9 +133,13 @@ def download(sequence: str, datasets_dir: Path) -> Path:
                 die(f"download failed: {e}")
 
     log(f"download: extracting {zip_path.name} ...")
+    # EuRoC ASL zips carry mav0/ at their ROOT (unzip yields mav0/..., not
+    # <sequence>/mav0/...), so extract into the sequence dir to get
+    # <seq>/mav0/.
+    seq_dir.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(datasets_dir)
+            zf.extractall(seq_dir)
     except zipfile.BadZipFile:
         zip_path.unlink(missing_ok=True)
         die(f"{zip_path} is not a valid zip (truncated download?) -- removed, retry")
@@ -345,7 +349,10 @@ def prepare(seq_dir: Path, out_opt: str, mono: bool, no_imu: bool,
     if model not in (None, "pinhole"):
         die(f"cam0 camera_model is {model!r}, not pinhole -- the adapter only supports pinhole+radtan")
     dmodel = cam0.get("distortion_model")
-    if dmodel not in (None, "radtan"):
+    # "radtan" (Kalibr spelling) and "radial-tangential" (EuRoC sensor.yaml
+    # spelling) are the same k1, k2, p1, p2 model the adapter feeds to
+    # camodocal's PINHOLE model.
+    if dmodel not in (None, "radtan", "radial-tangential"):
         die(f"cam0 distortion_model is {dmodel!r}, not radtan -- the adapter only supports pinhole+radtan")
 
     intrinsics = cam0.get("intrinsics")
