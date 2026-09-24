@@ -208,7 +208,12 @@ def load_sensor_yaml(path: Path) -> dict[str, object]:
 
 
 def t_bs_rows(sensor: dict[str, object]) -> list[list[float]]:
-    """T_BS 4x4 as four [r00 r01 r02 tx] rows -- the adapter's T_cam_body."""
+    """T_BS as the adapter's T_cam_body: a 3x4 [R|t].
+
+    sensor.yaml stores a full 4x4 homogeneous T_BS; the adapter's
+    read_cam_transform accepts exactly three [r00 r01 r02 tx] rows (a fourth
+    homogeneous row is rejected), so drop it here.
+    """
     t = sensor.get("T_BS")
     if not isinstance(t, dict):
         die("sensor.yaml has no T_BS block")
@@ -216,7 +221,7 @@ def t_bs_rows(sensor: dict[str, object]) -> list[list[float]]:
     if not isinstance(data, list) or not isinstance(rows, (int, float)) or int(rows) != 4 or len(data) != 16:
         die("sensor.yaml T_BS is not a 4x4 matrix")
     try:
-        return [[float(v) for v in data[i * 4:(i + 1) * 4]] for i in range(4)]  # type: ignore[index,call-arg]
+        return [[float(v) for v in data[i * 4:(i + 1) * 4]] for i in range(3)]  # type: ignore[index,call-arg]
     except (TypeError, ValueError):
         die("sensor.yaml T_BS data contains non-numeric values")
         raise  # unreachable; for type checkers

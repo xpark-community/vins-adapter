@@ -1,0 +1,72 @@
+{
+  "benchmark": "vins_adapter_cpu_vs_gpu",
+  "timestamp": "2026-09-23T22:10:34+0800",
+  "episode": {
+    "source": "/data/home/xiamingchen/datasets/euroc/MH_01_easy/config.yaml",
+    "frames": 3682
+  },
+  "environment": {
+    "node": "VM-64-201-tencentos",
+    "system": "Linux-6.6.30-5.tl4.x86_64-x86_64-with-glibc2.39",
+    "python": "3.14.7",
+    "cpu_count": 16,
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8255C CPU @ 2.50GHz",
+    "gpu_model": "Tesla T4",
+    "buildinfo": {
+      "target": "vins_adapter",
+      "built_at": "2026-09-23T13:38:06Z",
+      "source_repo": "https://github.com/HKUST-Aerial-Robotics/VINS-Fusion.git",
+      "source_commit": "be55a937a57436548ddfb1bd324bc1e9a9e828e0",
+      "docker_image": "vins-adapter:noetic-jammy",
+      "docker_image_id": "sha256:ec4f00db00f72209701b669704960dc7854be12492c8d851c253d2b567c7cefb",
+      "docker_platform": "linux/amd64",
+      "arch": "x86_64",
+      "host_arch": "x86_64",
+      "gpu": true,
+      "gpu_target": "vins_adapter_gpu",
+      "opencv_cuda_dir": "/data/home/xiamingchen/opencv-cuda-4.13.0/install",
+      "license": "GPLv3",
+      "note": "built locally, never redistributed"
+    }
+  },
+  "cpu": {
+    "binary": "/data/home/xiamingchen/Workspace/xpark-dev-home/vins-adapter/vins_adapter/vins_adapter",
+    "runs": [
+      476.3956050723791,
+      462.6347014158964,
+      468.72502287104726
+    ],
+    "min_s": 462.6347014158964,
+    "median_s": 468.72502287104726,
+    "mean_s": 469.2517764531076,
+    "max_s": 476.3956050723791,
+    "fps_median": 7.85535190215985,
+    "tum_rows": 3672
+  },
+  "gpu": {
+    "binary": "/data/home/xiamingchen/Workspace/xpark-dev-home/vins-adapter/vins_adapter/vins_adapter_gpu",
+    "runs": [
+      245.18157351389527,
+      245.12305741012096,
+      244.1811760701239
+    ],
+    "min_s": 244.1811760701239,
+    "median_s": 245.12305741012096,
+    "mean_s": 244.82860233138004,
+    "max_s": 245.18157351389527,
+    "fps_median": 15.02102674021221,
+    "tum_rows": 3672
+  },
+  "comparison": {
+    "speedup_median": 1.912202906668273,
+    "wall_time_reduction_pct": 47.704294533138736,
+    "trajectory": {
+      "cpu_rows": 3672,
+      "gpu_rows": 3672,
+      "matched": 3672,
+      "trans_rmse_m": 0.029546616843759355,
+      "trans_max_m": 0.08149675338763407,
+      "rot_max_deg": 0.7217854357255248
+    }
+  }
+}
