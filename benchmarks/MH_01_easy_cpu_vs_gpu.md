@@ -26,8 +26,8 @@ Per-run wall times (s), in order:
 **Dataset / episode**
 - EuRoC MAV `MH_01_easy` (Burri et al., IJRR 2016): stereo global-shutter
   grayscale, 752×480, 200 Hz IMU. 3682 frames (cam0 == cam1), ~363 s of motion.
-- Staged on local disk at `/data/home/xiamingchen/datasets/euroc/MH_01_easy`
-  (2.6 GB). The source copy on COS (`cos-jamintest-sh-1305424723`) is a
+- Staged on local disk at `$EPISODE_ROOT/MH_01_easy` (2.6 GB; `$EPISODE_ROOT`
+  is the local dataset root). The source copy on COS (`<cos-bucket>`) is a
   `fuse.cosfs` mount where listing/reading the frame dirs takes minutes, which
   would dominate and destabilize wall-clock timing — so it was copied to local
   ext4 first.
@@ -48,7 +48,7 @@ Per-run wall times (s), in order:
   Adapter `BUILDINFO.json`: image `vins-adapter:noetic-jammy`
   `sha256:ec4f00db00f7…`, `built_at 2026-09-23T13:38:06Z`, platform
   `linux/amd64`, `gpu: true`.
-- CUDA OpenCV build (`/data/home/xiamingchen/opencv-cuda-4.13.0/`, script
+- CUDA OpenCV build (source tree `$OPENCV_CUDA_SRC`, script
   `build_opencv_cuda.sh`): OpenCV 4.13.0 + opencv_contrib 4.13.0, CUDA 12.4
   (`V12.4.99`), `CUDA_ARCH_BIN=7.5`, `BUILD_SHARED_LIBS=ON`, C++14,
   `WITH_CUDNN=OFF`; modules `core imgproc imgcodecs features2d flann calib3d
@@ -58,7 +58,7 @@ Per-run wall times (s), in order:
 **Host / runtime**
 - CPU: Intel Xeon Platinum 8255C @ 2.50 GHz, 16 vCPU, 62 GB RAM.
 - GPU: NVIDIA Tesla T4, 15 GB, driver 550.90.07, CUDA toolkit 12.4.
-- Node: `VM-64-201-tencentos`, Linux 6.6.30 (TencentOS 4.2), x86_64.
+- Node: `<worker-node>`, Linux 6.6.30 (TencentOS 4.2), x86_64.
 - Both binaries single-threaded (`MULTIPLE_THREAD=0`), one process per run.
 
 **Method** (`benchmarks/benchmark_cpu_gpu.py`)
@@ -70,9 +70,9 @@ Per-run wall times (s), in order:
 - Exact command:
 
 ```bash
-VINS_OPENCV_CUDA_DIR=/data/home/xiamingchen/opencv-cuda-4.13.0/install \
+# with VINS_OPENCV_CUDA_DIR exported to the CUDA-enabled OpenCV install
 python3 benchmarks/benchmark_cpu_gpu.py \
-  --config /data/home/xiamingchen/datasets/euroc/MH_01_easy/config.yaml \
+  --config $EPISODE_ROOT/MH_01_easy/config.yaml \
   --runs 3 --warmup 1 --require-gpu \
   --json benchmarks/MH_01_easy_cpu_vs_gpu.json
 ```

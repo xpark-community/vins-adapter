@@ -41,6 +41,13 @@ standard library only (hand-rolled PNG) and cached under the system temp dir
 (--workdir / --regen to control), so repeated benchmarks do not pay the
 generation cost again.
 
+Redaction
+---------
+The JSON report is meant to be committed, so it never carries machine-local
+detail: absolute paths and the worker hostname are written as
+$EPISODE_ROOT/..., $VINS_OPENCV_CUDA_DIR, $VINS_ADAPTER_BUNDLE/<binary> and
+<worker-node> instead. The console log keeps the real paths for the operator.
+
 Standard library only. The bundle is a Linux ELF: run this on the worker the
 bundle was shipped to, not on macOS.
 
@@ -503,14 +510,50 @@ def fmt_variant(name: str, r: RunResult, n_frames: int) -> None:
     log(f"  trajectory: {r['tum_rows']} TUM rows")
 
 
+# ---------------------------------------------------------------- redaction
+
+
+def _redact_str(key: str, value: str) -> str:
+    """One field value -> a machine-independent placeholder.
+
+    Reports are committed, so no local absolute path or worker hostname may
+    survive; unknown absolute paths fall through to $LOCAL_ROOT/<name> as a
+    safety net.
+    """
+    if key == "node":
+        return "<worker-node>"
+    if key == "workdir":
+        return "<synthetic-episode>"
+    if key == "binary":
+        return f"$VINS_ADAPTER_BUNDLE/{Path(value).name}"
+    if key == "opencv_cuda_dir":
+        return "$VINS_OPENCV_CUDA_DIR" if value else value
+    if os.path.isabs(value) and not value.startswith("//"):
+        p = Path(value)
+        if key == "source":  # episode config; keep the episode dir name
+            return f"$EPISODE_ROOT/{p.parent.name}/{p.name}"
+        return f"$LOCAL_ROOT/{p.name}"
+    return value
+
+
+def _redact(value: object, key: str = "") -> object:
+    if isinstance(value, dict):
+        return {k: _redact(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(v, key) for v in value]
+    if isinstance(value, str):
+        return _redact_str(key, value)
+    return value
+
+
 def maybe_json(path_opt: str, result: BenchResult) -> None:
     if not path_opt:
         return
     path = Path(path_opt)
     if path.parent != Path(""):
         path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    log(f"results written: {path}")
+    path.write_text(json.dumps(_redact(result), indent=2) + "\n", encoding="utf-8")
+    log(f"results written: {path} (local paths/hostname redacted)")
 
 
 # -------------------------------------------------------------------- main

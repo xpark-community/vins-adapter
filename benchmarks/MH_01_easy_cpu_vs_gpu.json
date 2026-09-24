@@ -2,11 +2,11 @@
   "benchmark": "vins_adapter_cpu_vs_gpu",
   "timestamp": "2026-09-23T22:10:34+0800",
   "episode": {
-    "source": "/data/home/xiamingchen/datasets/euroc/MH_01_easy/config.yaml",
+    "source": "$EPISODE_ROOT/MH_01_easy/config.yaml",
     "frames": 3682
   },
   "environment": {
-    "node": "VM-64-201-tencentos",
+    "node": "<worker-node>",
     "system": "Linux-6.6.30-5.tl4.x86_64-x86_64-with-glibc2.39",
     "python": "3.14.7",
     "cpu_count": 16,
@@ -24,13 +24,13 @@
       "host_arch": "x86_64",
       "gpu": true,
       "gpu_target": "vins_adapter_gpu",
-      "opencv_cuda_dir": "/data/home/xiamingchen/opencv-cuda-4.13.0/install",
+      "opencv_cuda_dir": "$VINS_OPENCV_CUDA_DIR",
       "license": "GPLv3",
       "note": "built locally, never redistributed"
     }
   },
   "cpu": {
-    "binary": "/data/home/xiamingchen/Workspace/xpark-dev-home/vins-adapter/vins_adapter/vins_adapter",
+    "binary": "$VINS_ADAPTER_BUNDLE/vins_adapter",
     "runs": [
       476.3956050723791,
       462.6347014158964,
@@ -44,7 +44,7 @@
     "tum_rows": 3672
   },
   "gpu": {
-    "binary": "/data/home/xiamingchen/Workspace/xpark-dev-home/vins-adapter/vins_adapter/vins_adapter_gpu",
+    "binary": "$VINS_ADAPTER_BUNDLE/vins_adapter_gpu",
     "runs": [
       245.18157351389527,
       245.12305741012096,
