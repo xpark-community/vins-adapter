@@ -556,9 +556,18 @@ VINS_REMOTE="$(awk '$1 == "VINS-Fusion" {print $3}' "$UPSTREAM_PINS" 2>/dev/null
 [[ -n "$VINS_REMOTE" ]] || VINS_REMOTE="bundled snapshot: $SCRIPT_DIR/thirdparty/VINS-Fusion"
 GPU_JSON=false
 OPENCV_CUDA_JSON=""
+# Where the staged CUDA OpenCV came from, when the caller knows: the release
+# workflow downloads a pinned asset and passes its URL + sha256 so a consumer can
+# install the very same OpenCV on a GPU worker (the binary needs exactly the
+# modules that build carries). Empty for a local build off a plain directory.
+OPENCV_CUDA_URL="${OPENCV_CUDA_SOURCE_URL:-}"
+OPENCV_CUDA_SHA="${OPENCV_CUDA_SHA256:-}"
 if [[ "$BUILD_GPU" -eq 1 ]]; then
   GPU_JSON=true
   OPENCV_CUDA_JSON="$OPENCV_CUDA"
+else
+  OPENCV_CUDA_URL=""
+  OPENCV_CUDA_SHA=""
 fi
 cat > "$OUT/BUILDINFO.json" <<JSON
 {
@@ -574,8 +583,11 @@ cat > "$OUT/BUILDINFO.json" <<JSON
   "gpu": $GPU_JSON,
   "gpu_target": "vins_adapter_gpu",
   "opencv_cuda_dir": "$OPENCV_CUDA_JSON",
-  "license": "GPLv3",
-  "note": "built locally, never redistributed"
+  "opencv_cuda_source": {
+    "url": "$OPENCV_CUDA_URL",
+    "sha256": "$OPENCV_CUDA_SHA"
+  },
+  "license": "GPLv3"
 }
 JSON
 

@@ -12,29 +12,31 @@
 # build_vins_adapter.sh produces vins_adapter-linux-x86_64.tar.gz and its
 # md5sum-compatible .md5; both are uploaded as assets of the triggering release.
 #
-# GPU prerequisite (repository secret, set once by a maintainer):
-#   OPENCV_CUDA_TARBALL   URL of an archive holding a CUDA-enabled OpenCV 4.13.0
-#                         install. Any of these shapes works, because the step
-#                         below only needs an install prefix (a directory with
-#                         OpenCVConfig.cmake, or lib/cmake/opencv4/... and lib/
-#                         with the CUDA-enabled .so files) somewhere inside:
-#                           * a plain .tar.gz/.tar.xz of an install prefix,
-#                           * a distro package that ships one, e.g. Arch's
-#                             opencv-cuda-4.13.0-<rel>-x86_64.pkg.tar.zst:
-#                             https://archive.archlinux.org/packages/o/opencv-cuda/
-#                         The URL must be reachable from the runner (a distro
-#                         archive mirror, a GitHub release asset, or a
-#                         pre-signed object-storage URL). The same CUDA + OpenCV
-#                         build must be present on GPU workers at run time -- it
-#                         is intentionally NOT bundled (see the README "Build
-#                         (maintainers)" section). Because a release must always
-#                         include both CPU and GPU execution, the workflow fails
-#                         fast with a clear message when this secret is missing.
-#                         The OpenCV in the archive is a link-time dependency
-#                         only: its CUDA toolkit requirement is neutralised in
-#                         the build image (see the Dockerfile GPU section), so
-#                         the CUDA version of the archive does not have to match
-#                         the worker's.
+# GPU prerequisite (pinned asset, no secret required):
+#   The GPU binary is linked against a CUDA-enabled OpenCV 4.13.0 install that is
+#   published as a release asset of v0.1.1:
+#     opencv-cuda-4.13.0-linux-x86_64.tar.gz  (+ .md5 / .sha256)
+#   DEFAULT_OPENCV_CUDA_TARBALL / DEFAULT_OPENCV_CUDA_SHA256 below pin that
+#   download, and the fetch step verifies the checksum before building -- so the
+#   artifact that ships is reproducible, and a GPU worker can install the very
+#   same OpenCV. That matters because the GPU binary inherits the OpenCV module
+#   set it was linked against (VINS-Fusion-gpu links ${OpenCV_LIBS}, i.e. every
+#   module present): the published tarball carries exactly the required
+#   core/gapi/highgui/imgcodecs/videostab/cudafeatures2d plus their transitive
+#   modules. CUDA and OpenCV are deliberately NOT bundled in the adapter tarball.
+#   The archive only needs to be a link-time dependency: its CUDA toolkit
+#   requirement is neutralised in the build image (see the Dockerfile GPU
+#   section), so the CUDA version of the archive does not have to match the
+#   worker's (the worker supplies its own CUDA runtime).
+#
+#   Override (e.g. a rebuilt OpenCV) with BOTH:
+#     secret    OPENCV_CUDA_TARBALL   URL of a plain .tar.gz/.tar.xz of an
+#                                     install prefix (OpenCVConfig.cmake, or
+#                                     lib/cmake/opencv4/... + lib/) -- a distro
+#                                     package such as Arch's opencv-cuda-4.13.0
+#                                     <rel>-x86_64.pkg.tar.zst also works
+#     variable  OPENCV_CUDA_SHA256    sha256 of that archive
+#   The override fails closed: a URL without a checksum aborts the release.
 name: Build release
 
 on:
@@ -43,6 +45,14 @@ on:
 
 permissions:
   contents: write   # required to upload assets to the release
+
+env:
+  # Pinned CUDA-enabled OpenCV 4.13.0 the GPU binary is linked against. Published
+  # as a release asset of v0.1.1 (see the header). Both are overridden together
+  # by the OPENCV_CUDA_TARBALL secret + OPENCV_CUDA_SHA256 variable.
+  DEFAULT_OPENCV_CUDA_TARBALL: >-
+    https://github.com/xpark-community/vins-adapter/releases/download/v0.1.1/opencv-cuda-4.13.0-linux-x86_64.tar.gz
+  DEFAULT_OPENCV_CUDA_SHA256: 14072f0c752af02eee731262bd846cf5dfb29cc54c3dc55b33786369ef636097
 
 jobs:
   build:
@@ -71,25 +81,37 @@ jobs:
       - name: Fetch CUDA-enabled OpenCV for the GPU variant
         id: opencv
         env:
-          OPENCV_CUDA_TARBALL: ${{ secrets.OPENCV_CUDA_TARBALL }}
+          # Override path: a maintainer-supplied archive + its checksum. The
+          # checksum is mandatory -- the GPU worker has to run the same OpenCV,
+          # so an unverified download would silently break GPU execution.
+          OVERRIDE_URL: ${{ secrets.OPENCV_CUDA_TARBALL }}
+          OVERRIDE_SHA256: ${{ vars.OPENCV_CUDA_SHA256 }}
         run: |
           set -euo pipefail
-          if [[ -z "${OPENCV_CUDA_TARBALL:-}" ]]; then
-            echo "::error::OPENCV_CUDA_TARBALL secret is not set." >&2
-            echo "::error::A release must include both CPU and GPU execution, but the GPU" >&2
-            echo "::error::variant needs a CUDA-enabled OpenCV 4.13.0 install. Add a repo" >&2
-            echo "::error::secret OPENCV_CUDA_TARBALL pointing at an archive of that install" >&2
-            echo "::error::(plain .tar.gz/.tar.xz prefix, or a distro package such as Arch's" >&2
-            echo "::error::opencv-cuda-4.13.0-<rel>-x86_64.pkg.tar.zst)." >&2
-            exit 1
+          if [[ -n "${OVERRIDE_URL:-}" ]]; then
+            url="$OVERRIDE_URL"
+            sha="${OVERRIDE_SHA256:-}"
+            if [[ -z "$sha" ]]; then
+              echo "::error::OPENCV_CUDA_TARBALL is set but the OPENCV_CUDA_SHA256" >&2
+              echo "::error::repository variable is not: an override must be verified." >&2
+              exit 1
+            fi
+            echo "using override OpenCV from $url"
+          else
+            url="$DEFAULT_OPENCV_CUDA_TARBALL"
+            sha="$DEFAULT_OPENCV_CUDA_SHA256"
+            echo "using pinned OpenCV asset $url"
           fi
           dest="${RUNNER_TEMP}/opencv-cuda"
           archive="${RUNNER_TEMP}/opencv-cuda-archive"
           mkdir -p "$dest"
-          curl -fL --retry 3 -o "$archive" "$OPENCV_CUDA_TARBALL"
+          curl -fL --retry 3 -o "$archive" "$url"
+          # Always verify: a tampered/truncated archive would produce a GPU binary
+          # whose OpenCV expectations do not match what consumers install.
+          echo "${sha}  ${archive}" | sha256sum -c -
           # .zst archives (Arch/CachyOS packages) need zstd; everything else
           # (gzip, xz, bzip2) is handled by GNU tar itself.
-          case "${OPENCV_CUDA_TARBALL%%\?*}" in
+          case "${url%%\?*}" in
             *.zst|*.zstd)
               command -v zstd >/dev/null 2>&1 \
                 || { sudo apt-get update -qq && sudo apt-get install -y -qq zstd; }
@@ -120,7 +142,10 @@ jobs:
             exit 1
           fi
           echo "path=$prefix" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
           echo "CUDA-enabled OpenCV staged at: $prefix"
+          echo "modules: $(ls "$prefix"/lib/libopencv_*.so.* 2>/dev/null | xargs -r -n1 basename | sed -E 's/^libopencv_(.*)\.so.*/\1/' | sort -u | tr '\n' ' ')"
 
       - name: Build the CPU + GPU bundle
         # build_vins_adapter.sh builds the Docker image (RoboStack ROS1 Noetic +
@@ -132,6 +157,13 @@ jobs:
         # exercises the CPU binary via the launcher (the GPU functional test
         # self-skips when the worker-provided CUDA/OpenCV is absent), so a broken
         # bundle fails here instead of being published.
+        #
+        # OPENCV_CUDA_SOURCE_URL / OPENCV_CUDA_SHA256 are recorded in
+        # BUILDINFO.json so a consumer can install the exact OpenCV the GPU
+        # binary was linked against.
+        env:
+          OPENCV_CUDA_SOURCE_URL: ${{ steps.opencv.outputs.url }}
+          OPENCV_CUDA_SHA256: ${{ steps.opencv.outputs.sha256 }}
         run: |
           set -euo pipefail
           ./build_vins_adapter.sh \
@@ -150,6 +182,8 @@ jobs:
       - name: Verify the release artifacts
         # Fail the job before publishing if the build did not produce a valid
         # tarball + matching checksum, or if either execution variant is missing.
+        env:
+          OPENCV_PREFIX: ${{ steps.opencv.outputs.path }}
         run: |
           set -euo pipefail
           tar="vins_adapter-linux-x86_64.tar.gz"
@@ -180,6 +214,20 @@ jobs:
             grep -q "$mod" <<<"$gpu_needed" \
               || { echo "::error::vins_adapter_gpu does not link $mod"; exit 1; }
           done
+          echo "--- pinned OpenCV must satisfy every OpenCV module the GPU needs ---"
+          # The GPU binary inherits the whole module set of the OpenCV it linked
+          # against (VINS-Fusion-gpu links ${OpenCV_LIBS}). Anything it needs that
+          # the published OpenCV lacks would make workers fall back to CPU, so
+          # this is a hard release gate.
+          ocv_needs="$( { readelf -d vins_adapter/vins_adapter_gpu
+                          readelf -d vins_adapter/lib_gpu/*.so* 2>/dev/null
+                        } | grep -oE 'libopencv_[a-z0-9_]+\.so\.[0-9]+' | sort -u )"
+          printf '%s\n' "$ocv_needs" | sed 's/^/  need /'
+          for lib in $ocv_needs; do
+            [[ -e "${OPENCV_PREFIX}/lib/${lib}" ]] \
+              || { echo "::error::GPU binary needs $lib but the pinned OpenCV at ${OPENCV_PREFIX} does not ship it"; exit 1; }
+          done
+          echo "all ${OPENCV_PREFIX##*/} OpenCV modules satisfied"
           echo "--- provenance ---"
           cat vins_adapter/BUILDINFO.json
           ls -lh "$tar" "$md5"

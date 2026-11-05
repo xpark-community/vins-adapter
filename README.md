@@ -211,23 +211,39 @@ The build target follows the compiling machine's CPU arch; override with
 `--platform linux/amd64|linux/arm64`. The regression suite runs automatically
 (opt out with `--skip-tests`).
 
-Only a *link-time* OpenCV is needed, so a distro package that ships one is
-enough — no CUDA toolkit and no GPU are required on the build host (the image
-neutralises the config's CUDA-toolkit requirement, see the `Dockerfile` GPU
-section). For example, Arch's CUDA build of OpenCV 4.13:
+Only a *link-time* OpenCV is needed, so a CUDA-enabled distro build is enough —
+no CUDA toolkit and no GPU are required on the build host (the image neutralises
+the config's CUDA-toolkit requirement, see the `Dockerfile` GPU section).
+
+**Use the published OpenCV.** The vendor-neutral, reproducible option is the
+CUDA-enabled OpenCV 4.13.0 install published with v0.1.1, which carries exactly
+the modules the GPU binary needs (`core`, `imgproc`, `imgcodecs`, `calib3d`,
+`features2d`, `flann`, `highgui`, `video`, `photo`, `gapi`, `videostab`,
+`optflow`, `ximgproc`, `cudaarithm`, `cudafeatures2d`, `cudafilters`,
+`cudaimgproc`, `cudaoptflow`, `cudawarping`, `cudev`; CUDA 12.4, `sm_75`):
 
 ```bash
-curl -fLo /tmp/opencv-cuda.pkg.tar.zst \
-  https://archive.archlinux.org/packages/o/opencv-cuda/opencv-cuda-4.13.0-12-x86_64.pkg.tar.zst
-mkdir -p /tmp/opencv-cuda && tar --zstd -xf /tmp/opencv-cuda.pkg.tar.zst -C /tmp/opencv-cuda
-./build_vins_adapter.sh --platform linux/amd64 --opencv-cuda /tmp/opencv-cuda/usr
+curl -fLO https://github.com/xpark-community/vins-adapter/releases/download/v0.1.1/opencv-cuda-4.13.0-linux-x86_64.tar.gz
+curl -fLO https://github.com/xpark-community/vins-adapter/releases/download/v0.1.1/opencv-cuda-4.13.0-linux-x86_64.tar.gz.sha256
+sha256sum -c opencv-cuda-4.13.0-linux-x86_64.tar.gz.sha256
+mkdir -p /tmp/opencv-cuda && tar -xzf opencv-cuda-4.13.0-linux-x86_64.tar.gz -C /tmp/opencv-cuda
+./build_vins_adapter.sh --platform linux/amd64 \
+  --opencv-cuda /tmp/opencv-cuda/opencv-cuda-4.13.0
 ```
 
-CI does the same thing: the release workflow (`.github/workflows/release.yml`)
-builds both variants on `ubuntu-22.04` when a release is published, and takes
-the CUDA OpenCV URL from the `OPENCV_CUDA_TARBALL` repository secret (a plain
-`.tar.gz`/`.tar.xz` of an install prefix, or a distro package such as the Arch
-one above). Publishing a release therefore requires that secret to be set.
+That same directory is what a **GPU worker** needs at run time (point
+`VINS_OPENCV_CUDA_DIR` at it, or put its `lib/` on `LD_LIBRARY_PATH`). The GPU
+binary inherits the module set it was linked against — `VINS-Fusion-gpu` links
+`${OpenCV_LIBS}`, i.e. *every* module the OpenCV build ships — so a leaner
+OpenCV will make it fail to load and the launcher will quietly fall back to CPU.
+
+The release workflow (`.github/workflows/release.yml`) downloads that pinned
+asset and verifies its sha256 on every run; `BUILDINFO.json` records the URL and
+checksum so a consumer can install the identical OpenCV. To build against a
+different OpenCV, set the `OPENCV_CUDA_TARBALL` secret **and** the
+`OPENCV_CUDA_SHA256` repository variable — the override fails closed without a
+checksum (a plain `.tar.gz`/`.tar.xz` install prefix, or a distro package such as
+Arch's `opencv-cuda-4.13.0-<rel>-x86_64.pkg.tar.zst`, both work).
 
 Artifacts land in `vins_adapter/`:
 
