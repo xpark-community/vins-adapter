@@ -52,7 +52,7 @@ env:
   # by the OPENCV_CUDA_TARBALL secret + OPENCV_CUDA_SHA256 variable.
   DEFAULT_OPENCV_CUDA_TARBALL: >-
     https://github.com/xpark-community/vins-adapter/releases/download/v0.1.1/opencv-cuda-4.13.0-linux-x86_64.tar.gz
-  DEFAULT_OPENCV_CUDA_SHA256: 14072f0c752af02eee731262bd846cf5dfb29cc54c3dc55b33786369ef636097
+  DEFAULT_OPENCV_CUDA_SHA256: 3119c0773862506f6b690f8d51bd0f851172a450052ffdf4120dee3f0ed3ab60
 
 jobs:
   build:

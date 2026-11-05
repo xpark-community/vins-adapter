@@ -220,7 +220,11 @@ CUDA-enabled OpenCV 4.13.0 install published with v0.1.1, which carries exactly
 the modules the GPU binary needs (`core`, `imgproc`, `imgcodecs`, `calib3d`,
 `features2d`, `flann`, `highgui`, `video`, `photo`, `gapi`, `videostab`,
 `optflow`, `ximgproc`, `cudaarithm`, `cudafeatures2d`, `cudafilters`,
-`cudaimgproc`, `cudaoptflow`, `cudawarping`, `cudev`; CUDA 12.4, `sm_75`):
+`cudaimgproc`, `cudaoptflow`, `cudawarping`, `cudev`; CUDA 12.9.1,
+`CUDA_ARCH_BIN=7.5;8.0;8.6;8.9;9.0;12.0` — one install runs on T4, A100,
+A10/A40, L20/L4/4090, H100 and RTX PRO 5000 (Blackwell; sm_120 needs CUDA ≥12.8).
+Binaries built against it still run on CUDA 12.x drivers via minor version
+compatibility):
 
 ```bash
 curl -fLO https://github.com/xpark-community/vins-adapter/releases/download/v0.1.1/opencv-cuda-4.13.0-linux-x86_64.tar.gz
