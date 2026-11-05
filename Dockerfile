@@ -178,20 +178,50 @@ RUN cd /utest \
 COPY .opencv-cuda/ /opt/opencv-cuda/
 
 # The CUDA OpenCV ships an OpenCVConfig.cmake that hard-REQUIRES the CUDA
-# toolkit at configure time (find_host_package(CUDA ... EXACT REQUIRED)) so it
-# can expose CUDA_LIBRARIES. This build image has no CUDA toolkit -- the GPU
-# worker provides the CUDA runtime at run time, and linking only needs the
-# OpenCV .so paths (--allow-shlib-undefined covers their CUDA NEEDED entries).
-# Pre-seed CUDA_FOUND + a find_cuda_helper_libs stub so that REQUIRED find is
-# skipped; patch only the copy inside the image, the staged package stays
-# pristine.
+# toolkit at configure time, so that it can expose CUDA_LIBRARIES /
+# CUDA::cudart. This build image has no CUDA toolkit -- the GPU worker provides
+# the CUDA runtime at run time, and linking only needs the OpenCV .so paths
+# (--allow-shlib-undefined covers their CUDA NEEDED entries). Two config shapes
+# are handled, so any CUDA-enabled OpenCV 4.x install can be staged:
+#
+#   * classic FindCUDA builds: `if(NOT CUDA_FOUND)` guards a
+#     `find_host_package(CUDA <ver> EXACT REQUIRED)` plus a
+#     find_cuda_helper_libs macro. Pre-seed CUDA_FOUND and stub the macro so the
+#     REQUIRED find is skipped.
+#   * CUDA-as-first-class-language builds (CMake >= 3.18, OpenCV >= 4.11):
+#     `if(NOT CUDAToolkit_FOUND)` guards `find_package(CUDAToolkit <ver> EXACT
+#     REQUIRED)` and then FATAL_ERRORs when CUDA_VERSION_STRING does not equal
+#     the version the install was built with. Pre-seed CUDAToolkit_FOUND and
+#     CUDAToolkit_VERSION (read back from the config) so the whole block is
+#     skipped without tripping that check.
+#
+# Either way the imported CUDA::cudart target referenced by some module link
+# interfaces (opencv_stitching) is stubbed at the end: nothing is linked from
+# it, it only has to exist at CMake generate time.
+#
+# Only the copy inside the image is patched; the staged package stays pristine.
 #
 # Gated on BUILD_GPU: a CPU-only build stages just a placeholder .keep (the
 # COPY above cannot be conditional), so there is no OpenCVConfig.cmake to patch.
 RUN if [ "$BUILD_GPU" = "1" ]; then \
-      sed -i 's|^if(NOT CUDA_FOUND)$|set(CUDA_FOUND TRUE)\nset(CUDA_VERSION_STRING "12.4")\nmacro(find_cuda_helper_libs _var)\nendmacro()\nif(NOT CUDA_FOUND)|' \
-        /opt/opencv-cuda/lib/cmake/opencv4/OpenCVConfig.cmake \
-      && grep -q 'set(CUDA_FOUND TRUE)' /opt/opencv-cuda/lib/cmake/opencv4/OpenCVConfig.cmake; \
+      cfg=""; \
+      for c in /opt/opencv-cuda/OpenCVConfig.cmake \
+               /opt/opencv-cuda/lib/cmake/opencv4/OpenCVConfig.cmake \
+               /opt/opencv-cuda/lib64/cmake/opencv4/OpenCVConfig.cmake; do \
+        if [ -f "$c" ]; then cfg="$c"; break; fi; \
+      done; \
+      test -n "$cfg" \
+        || { echo "BUILD_GPU=1 but no OpenCVConfig.cmake under /opt/opencv-cuda" >&2; exit 1; }; \
+      cuda_ver="$(sed -n 's|^set(OpenCV_CUDA_VERSION[[:space:]]*"\(.*\)")$|\1|p' "$cfg" | head -n1)"; \
+      cuda_ver="${cuda_ver:-12.4}"; \
+      echo "patching $cfg (this OpenCV was built with CUDA $cuda_ver)"; \
+      sed -i \
+        -e "s|^if(NOT CUDA_FOUND)\$|set(CUDA_FOUND TRUE)\nset(CUDA_VERSION_STRING \"$cuda_ver\")\nmacro(find_cuda_helper_libs _var)\nendmacro()\nif(NOT CUDA_FOUND)|" \
+        -e "s|^if(NOT CUDAToolkit_FOUND)\$|set(CUDAToolkit_FOUND TRUE)\nset(CUDAToolkit_VERSION \"$cuda_ver\")\nif(NOT CUDAToolkit_FOUND)|" \
+        "$cfg" \
+      && grep -qE 'set\((CUDA|CUDAToolkit)_FOUND TRUE\)' "$cfg" \
+        || { echo "could not neutralise the CUDA toolkit requirement in $cfg" >&2; exit 1; }; \
+      printf '\nif(NOT TARGET CUDA::cudart)\n  add_library(CUDA::cudart INTERFACE IMPORTED)\nendif()\n' >> "$cfg"; \
     fi
 
 WORKDIR /ws_gpu/src

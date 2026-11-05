@@ -211,6 +211,24 @@ The build target follows the compiling machine's CPU arch; override with
 `--platform linux/amd64|linux/arm64`. The regression suite runs automatically
 (opt out with `--skip-tests`).
 
+Only a *link-time* OpenCV is needed, so a distro package that ships one is
+enough — no CUDA toolkit and no GPU are required on the build host (the image
+neutralises the config's CUDA-toolkit requirement, see the `Dockerfile` GPU
+section). For example, Arch's CUDA build of OpenCV 4.13:
+
+```bash
+curl -fLo /tmp/opencv-cuda.pkg.tar.zst \
+  https://archive.archlinux.org/packages/o/opencv-cuda/opencv-cuda-4.13.0-12-x86_64.pkg.tar.zst
+mkdir -p /tmp/opencv-cuda && tar --zstd -xf /tmp/opencv-cuda.pkg.tar.zst -C /tmp/opencv-cuda
+./build_vins_adapter.sh --platform linux/amd64 --opencv-cuda /tmp/opencv-cuda/usr
+```
+
+CI does the same thing: the release workflow (`.github/workflows/release.yml`)
+builds both variants on `ubuntu-22.04` when a release is published, and takes
+the CUDA OpenCV URL from the `OPENCV_CUDA_TARBALL` repository secret (a plain
+`.tar.gz`/`.tar.xz` of an install prefix, or a distro package such as the Arch
+one above). Publishing a release therefore requires that secret to be set.
+
 Artifacts land in `vins_adapter/`:
 
 | path | what |

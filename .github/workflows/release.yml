@@ -13,17 +13,28 @@
 # md5sum-compatible .md5; both are uploaded as assets of the triggering release.
 #
 # GPU prerequisite (repository secret, set once by a maintainer):
-#   OPENCV_CUDA_TARBALL   URL of a .tar.gz holding a CUDA-enabled OpenCV 4.13.0
-#                         install (an install prefix containing
+#   OPENCV_CUDA_TARBALL   URL of an archive holding a CUDA-enabled OpenCV 4.13.0
+#                         install. Any of these shapes works, because the step
+#                         below only needs an install prefix (a directory with
 #                         OpenCVConfig.cmake, or lib/cmake/opencv4/... and lib/
-#                         with the CUDA-enabled .so files). It must be reachable
-#                         from the runner (e.g. a GitHub release asset URL or a
+#                         with the CUDA-enabled .so files) somewhere inside:
+#                           * a plain .tar.gz/.tar.xz of an install prefix,
+#                           * a distro package that ships one, e.g. Arch's
+#                             opencv-cuda-4.13.0-<rel>-x86_64.pkg.tar.zst:
+#                             https://archive.archlinux.org/packages/o/opencv-cuda/
+#                         The URL must be reachable from the runner (a distro
+#                         archive mirror, a GitHub release asset, or a
 #                         pre-signed object-storage URL). The same CUDA + OpenCV
 #                         build must be present on GPU workers at run time -- it
 #                         is intentionally NOT bundled (see the README "Build
 #                         (maintainers)" section). Because a release must always
 #                         include both CPU and GPU execution, the workflow fails
 #                         fast with a clear message when this secret is missing.
+#                         The OpenCV in the archive is a link-time dependency
+#                         only: its CUDA toolkit requirement is neutralised in
+#                         the build image (see the Dockerfile GPU section), so
+#                         the CUDA version of the archive does not have to match
+#                         the worker's.
 name: Build release
 
 on:
@@ -47,11 +58,14 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Free up disk space on the runner
-        # The image builds ROS1 + VINS-Fusion twice (CPU + GPU workspaces) and
-        # copies a full shared-library closure; github runners ship with a lot of
-        # unused toolchains that would otherwise crowd the ~14 GB free disk.
+        # The image builds ROS1 + VINS-Fusion twice (CPU + GPU workspaces), stages
+        # a ~1.9 GB CUDA OpenCV prefix and copies a full shared-library closure;
+        # github runners ship with a lot of unused toolchains that would
+        # otherwise crowd the free disk.
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/share/swift \
+                      /opt/microsoft /usr/local/lib/node_modules
           df -h /
 
       - name: Fetch CUDA-enabled OpenCV for the GPU variant
@@ -64,13 +78,26 @@ jobs:
             echo "::error::OPENCV_CUDA_TARBALL secret is not set." >&2
             echo "::error::A release must include both CPU and GPU execution, but the GPU" >&2
             echo "::error::variant needs a CUDA-enabled OpenCV 4.13.0 install. Add a repo" >&2
-            echo "::error::secret OPENCV_CUDA_TARBALL pointing at a .tar.gz of that install." >&2
+            echo "::error::secret OPENCV_CUDA_TARBALL pointing at an archive of that install" >&2
+            echo "::error::(plain .tar.gz/.tar.xz prefix, or a distro package such as Arch's" >&2
+            echo "::error::opencv-cuda-4.13.0-<rel>-x86_64.pkg.tar.zst)." >&2
             exit 1
           fi
           dest="${RUNNER_TEMP}/opencv-cuda"
+          archive="${RUNNER_TEMP}/opencv-cuda-archive"
           mkdir -p "$dest"
-          curl -fL --retry 3 -o "${RUNNER_TEMP}/opencv-cuda.tar.gz" "$OPENCV_CUDA_TARBALL"
-          tar -xzf "${RUNNER_TEMP}/opencv-cuda.tar.gz" -C "$dest"
+          curl -fL --retry 3 -o "$archive" "$OPENCV_CUDA_TARBALL"
+          # .zst archives (Arch/CachyOS packages) need zstd; everything else
+          # (gzip, xz, bzip2) is handled by GNU tar itself.
+          case "${OPENCV_CUDA_TARBALL%%\?*}" in
+            *.zst|*.zstd)
+              command -v zstd >/dev/null 2>&1 \
+                || { sudo apt-get update -qq && sudo apt-get install -y -qq zstd; }
+              zstd -dc "$archive" | tar -xf - -C "$dest" ;;
+            *)
+              tar -xf "$archive" -C "$dest" ;;
+          esac
+          du -sh "$dest"
           # The tarball holds an OpenCV install prefix (lib/, include/, ...).
           # Locate its OpenCVConfig.cmake, then strip the known cmake suffix to
           # recover the prefix -- that is the directory --opencv-cuda expects
@@ -110,6 +137,15 @@ jobs:
           ./build_vins_adapter.sh \
             --platform linux/amd64 \
             --opencv-cuda "${{ steps.opencv.outputs.path }}"
+
+      - name: Reclaim disk after the build
+        # The build image (ROS1 + both catkin workspaces + the staged ~1.9 GB
+        # CUDA OpenCV prefix) is not needed once the bundle is on disk; dropping
+        # it keeps the runner from filling up during the upload.
+        run: |
+          docker image rm -f vins-adapter:noetic-jammy || true
+          docker builder prune -af || true
+          df -h /
 
       - name: Verify the release artifacts
         # Fail the job before publishing if the build did not produce a valid

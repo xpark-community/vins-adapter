@@ -181,3 +181,5 @@ vins_adapter
 .opencv-cuda/
 vins_adapter.tar.gz
 vins_adapter.tar.gz.md5
+vins_adapter-linux-*.tar.gz
+vins_adapter-linux-*.tar.gz.md5
