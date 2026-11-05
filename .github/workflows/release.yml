@@ -157,12 +157,29 @@ jobs:
           test -s "$tar"
           test -s "$md5"
           md5sum -c "$md5"
+          # List the archive once and match against that: piping `tar -tzf` into
+          # `grep -q` kills tar with SIGPIPE as soon as grep matches, and with
+          # `set -o pipefail` the pipeline then reports a failure even though the
+          # entry was found.
+          listing="$(tar -tzf "$tar")"
           echo "--- execution variants in tarball ---"
-          tar -tzf "$tar" | grep -E 'vins_adapter/(vins_adapter|vins_adapter_gpu|run_vins_adapter.sh|BUILDINFO.json)$' | sort
-          tar -tzf "$tar" | grep -q 'vins_adapter/vins_adapter$' \
-            || { echo "::error::CPU binary vins_adapter is absent"; exit 1; }
-          tar -tzf "$tar" | grep -q 'vins_adapter/vins_adapter_gpu$' \
-            || { echo "::error::GPU binary vins_adapter_gpu is absent"; exit 1; }
+          grep -E 'vins_adapter/(vins_adapter|vins_adapter_gpu|run_vins_adapter.sh|BUILDINFO.json)$' \
+            <<<"$listing" | sort
+          for want in vins_adapter/vins_adapter vins_adapter/vins_adapter_gpu \
+                      vins_adapter/run_vins_adapter.sh vins_adapter/BUILDINFO.json; do
+            grep -Fxq "$want" <<<"$listing" \
+              || { echo "::error::required bundle entry $want is absent"; exit 1; }
+          done
+          echo "--- GPU binary really links the CUDA OpenCV modules ---"
+          # The bundle deliberately does not ship OpenCV, so these entries show up
+          # as "not found"; what matters is that the CUDA fork's modules are the
+          # ones recorded (a CPU-only OpenCV would have no libopencv_cuda* at all).
+          gpu_needed="$(ldd vins_adapter/vins_adapter_gpu 2>/dev/null || true)"
+          grep 'libopencv' <<<"$gpu_needed" | sort || true
+          for mod in libopencv_core libopencv_cudaimgproc libopencv_cudaoptflow; do
+            grep -q "$mod" <<<"$gpu_needed" \
+              || { echo "::error::vins_adapter_gpu does not link $mod"; exit 1; }
+          done
           echo "--- provenance ---"
           cat vins_adapter/BUILDINFO.json
           ls -lh "$tar" "$md5"
