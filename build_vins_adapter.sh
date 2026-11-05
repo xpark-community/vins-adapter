@@ -599,7 +599,18 @@ log "bundle checksum: $TARBALL.md5"
 # was just built (see tests/run_tests.py for what is covered).
 if [[ "$SKIP_TESTS" -eq 0 && -f "$SCRIPT_DIR/tests/run_tests.py" ]]; then
   log "running regression tests"
-  python3 "$SCRIPT_DIR/tests/run_tests.py" --adapter "$OUT/run_vins_adapter.sh" \
-    || die "regression tests failed (see above)"
+  if host_can_run; then
+    python3 "$SCRIPT_DIR/tests/run_tests.py" --adapter "$OUT/run_vins_adapter.sh" \
+      || die "regression tests failed (see above)"
+  else
+    # The functional half executes the just-built ELF, which a macOS or
+    # cross-arch build host cannot run. Reuse the build image (already local,
+    # same platform, has bash+python3) with the source tree mounted.
+    log "host $(uname -s)/$(uname -m) cannot execute a linux/$PKG_ARCH ELF: running the regression tests in a container"
+    docker run --rm --platform "$PLATFORM" \
+      -v "$SCRIPT_DIR":/repo -w /repo "$IMAGE:$TAG" \
+      python3 tests/run_tests.py --adapter "/repo/$(basename "$OUT")/run_vins_adapter.sh" \
+      || die "regression tests failed (see above)"
+  fi
 fi
 log "done"

@@ -17,8 +17,9 @@ Two layers:
        deref in processImage).
 
 2. Functional tests against the built adapter (skipped with --sources-only):
-   argv contract, config error paths, undecodable-frame handling, temp-dir
-   cleanup, TUM output validity, and clean exit on untrackable input.
+   argv contract, config error paths (bad/missing extrinsics, stereo frame-count
+   mismatch, unwritable output), undecodable-frame handling, temp-dir cleanup,
+   TUM output validity, and clean exit on untrackable input.
 
 Usage:
     python3 tests/run_tests.py [--adapter PATH] [--sources-only]
@@ -179,6 +180,12 @@ def test_source_guards() -> None:
         "c.estimate_extrinsic = c.use_imu ? estimate_extrinsic : 0;" in spec,
         "null pre_integrations deref in processImage (estimator.cpp "
         "ESTIMATE_EXTRINSIC == 2 branch) for vision-only runs",
+    )
+    check(
+        "EX_CALIB_RESULT_PATH points at the scratch dir",
+        'EX_CALIB_RESULT_PATH = (tmp_dir / "extrinsic_result.yaml").string();' in src,
+        "empty path -> printStatistics() logs \"Can't open file: '' in write "
+        "mode\" on every NON_LINEAR frame once ESTIMATE_EXTRINSIC != 0",
     )
 
     est = ESTIMATOR_H.read_text(encoding="utf-8")
@@ -366,6 +373,57 @@ def test_functional(adapter: str) -> None:
             "missing T_cam0_body fails",
             proc.returncode == 1 and "T_cam0_body" in proc.stderr,
             f"exit={proc.returncode} stderr={proc.stderr[:120]!r}",
+        )
+
+        # stereo with a right dir shorter than the left: refuse up front with a
+        # message instead of silently truncating or crashing later.
+        left = work / "mismatch_l"
+        right = work / "mismatch_r"
+        write_frames(left, N_FRAMES)
+        write_frames(right, N_FRAMES // 2)
+        cfg = work / "mismatch.yaml"
+        write_config(cfg, left, right)
+        proc = run_adapter(adapter, cfg, work / "o.tum")
+        check(
+            "stereo mismatch fails",
+            proc.returncode == 1 and "stereo mismatch" in proc.stderr,
+            f"exit={proc.returncode} stderr={proc.stderr[:120]!r}",
+        )
+
+        # stereo without T_cam1_body: the second camera's extrinsic is required.
+        # (Full-length right dir so the frame-count check passes first.)
+        right_full = work / "mismatch_r_full"
+        write_frames(right_full, N_FRAMES)
+        before = tmp_dir_count()
+        cfg = work / "bad_transform1.yaml"
+        write_config(cfg, left, right_full)
+        cfg.write_text(cfg.read_text(encoding="utf-8").replace("T_cam1_body:", "T_cam1_missing:"), encoding="utf-8")
+        proc = run_adapter(adapter, cfg, work / "o.tum")
+        check(
+            "missing T_cam1_body fails",
+            proc.returncode == 1 and "T_cam1_body" in proc.stderr,
+            f"exit={proc.returncode} stderr={proc.stderr[:120]!r}",
+        )
+        check(
+            "missing T_cam1_body: scratch dir cleaned up",
+            tmp_dir_count() <= before,
+            f"before={before} after={tmp_dir_count()}",
+        )
+
+        # unwritable output path: reported, exit 1, scratch dir cleaned up.
+        before = tmp_dir_count()
+        cfg = work / "mono_for_out.yaml"
+        write_config(cfg, frames)
+        proc = run_adapter(adapter, cfg, work / "no_such_dir" / "o.tum")
+        check(
+            "unwritable output fails",
+            proc.returncode == 1 and "cannot open output" in proc.stderr,
+            f"exit={proc.returncode} stderr={proc.stderr[:120]!r}",
+        )
+        check(
+            "unwritable output: scratch dir cleaned up",
+            tmp_dir_count() <= before,
+            f"before={before} after={tmp_dir_count()}",
         )
 
         # one undecodable frame mid-sequence: graceful failure, no crash,

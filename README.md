@@ -234,6 +234,11 @@ python3 tests/run_tests.py --adapter /path/to/binary
 python3 tests/run_tests.py --sources-only   # no build needed
 ```
 
+The functional half executes the built Linux ELF, so it can only run on a Linux
+host of the artifact's arch. On a macOS or cross-arch build host, run it inside a
+container of the build platform — `build_vins_adapter.sh` does that for you
+automatically (the `--sources-only` guards still pass anywhere).
+
 ## License
 
 VINS-Fusion is **GPLv3**, and the adapter links against it, so this project is

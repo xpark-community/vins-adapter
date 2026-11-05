@@ -150,6 +150,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Scoped cleanup: every return path below (bad cameras, unwritable output,
+  // a frame that fails to decode, ...) leaves the scratch dir behind otherwise.
+  struct TempDirCleanup {
+    const fs::path &dir;
+    ~TempDirCleanup() {
+      std::error_code ignored;
+      fs::remove_all(dir, ignored);
+    }
+  } cleanup_tmp_dir{tmp_dir};
+
   fs::path cam0_yaml = tmp_dir / "cam0.yaml";
   fs::path cam1_yaml = tmp_dir / "cam1.yaml";
   write_camodocal_pinhole(cam0_yaml, "cam0", width, height, spec.fx, spec.fy,
@@ -201,6 +211,13 @@ int main(int argc, char **argv) {
   VINS_RESULT_PATH = "";
   OUTPUT_FOLDER = "";
   FISHEYE_MASK = "";
+  // printStatistics() re-writes the calibrated extrinsics every NON_LINEAR
+  // frame when ESTIMATE_EXTRINSIC != 0; upstream derives the path from
+  // OUTPUT_FOLDER in readParameters(), which never runs here. Leaving it empty
+  // makes every frame log "Can't open file: '' in write mode". The adapter has
+  // no extrinsic output contract, so point it inside the scratch dir that is
+  // removed on exit.
+  EX_CALIB_RESULT_PATH = (tmp_dir / "extrinsic_result.yaml").string();
 
   bool ok = true;
   Eigen::Matrix3d R0;
@@ -288,7 +305,6 @@ int main(int argc, char **argv) {
   }
 
   std::fclose(out);
-  fs::remove_all(tmp_dir, ec);
 
   if (run_error != nullptr) {
     std::cerr << "vins_adapter: " << run_error << "\n";

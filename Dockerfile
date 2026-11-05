@@ -185,9 +185,14 @@ COPY .opencv-cuda/ /opt/opencv-cuda/
 # Pre-seed CUDA_FOUND + a find_cuda_helper_libs stub so that REQUIRED find is
 # skipped; patch only the copy inside the image, the staged package stays
 # pristine.
-RUN sed -i 's|^if(NOT CUDA_FOUND)$|set(CUDA_FOUND TRUE)\nset(CUDA_VERSION_STRING "12.4")\nmacro(find_cuda_helper_libs _var)\nendmacro()\nif(NOT CUDA_FOUND)|' \
+#
+# Gated on BUILD_GPU: a CPU-only build stages just a placeholder .keep (the
+# COPY above cannot be conditional), so there is no OpenCVConfig.cmake to patch.
+RUN if [ "$BUILD_GPU" = "1" ]; then \
+      sed -i 's|^if(NOT CUDA_FOUND)$|set(CUDA_FOUND TRUE)\nset(CUDA_VERSION_STRING "12.4")\nmacro(find_cuda_helper_libs _var)\nendmacro()\nif(NOT CUDA_FOUND)|' \
         /opt/opencv-cuda/lib/cmake/opencv4/OpenCVConfig.cmake \
-    && grep -q 'set(CUDA_FOUND TRUE)' /opt/opencv-cuda/lib/cmake/opencv4/OpenCVConfig.cmake
+      && grep -q 'set(CUDA_FOUND TRUE)' /opt/opencv-cuda/lib/cmake/opencv4/OpenCVConfig.cmake; \
+    fi
 
 WORKDIR /ws_gpu/src
 COPY thirdparty/VINS-Fusion-gpu/ /ws_gpu/src/VINS-Fusion-gpu/
