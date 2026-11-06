@@ -249,6 +249,35 @@ different OpenCV, set the `OPENCV_CUDA_TARBALL` secret **and** the
 checksum (a plain `.tar.gz`/`.tar.xz` install prefix, or a distro package such as
 Arch's `opencv-cuda-4.13.0-<rel>-x86_64.pkg.tar.zst`, both work).
 
+### Rebuilding the published CUDA OpenCV
+
+That OpenCV is a versioned artifact of this repository, so it is built by a
+checked-in script inside a digest-pinned container, not by hand on someone's VM:
+
+```bash
+./tools/build_opencv_cuda.sh                       # all archs -> dist/
+./tools/build_opencv_cuda.sh --arch-bin 7.5        # fast single-arch smoke build
+gh release upload <tag> dist/opencv-cuda-*.tar.gz* --clobber
+# then copy the printed sha256 into .github/workflows/release.yml
+#   env.DEFAULT_OPENCV_CUDA_TARBALL / env.DEFAULT_OPENCV_CUDA_SHA256
+```
+
+- Container: `nvidia/cuda:12.9.1-devel-ubuntu22.04`, pinned by digest inside the
+  script. The newer toolkit is deliberate: `sm_120` (RTX PRO 5000 / Blackwell)
+  needs CUDA >= 12.8, and 12.9 output still runs on 12.x drivers (minor version
+  compatibility).
+- `CUDA_ARCH_BIN` defaults to `7.5;8.0;8.6;8.9;9.0;12.0` -- T4, A100, A10/A40,
+  L20/L4/4090, H100, RTX PRO 5000. The adapter's own CUDA libraries contain no
+  cubins (all GPU work goes through OpenCV), so this list *is* the GPU coverage.
+- **No GPU is needed** to build: nvcc emits fatbins per arch, so this also runs on
+  a plain CI runner. `Actions -> "Build CUDA OpenCV"`
+  (`.github/workflows/opencv-cuda.yml`) does exactly that, checks that every
+  module the adapter needs is present, uploads the `.tar.gz`/`.md5`/`.sha256` to
+  the release you point it at, and prints the sha256 to pin.
+- `BUILDINFO.txt` inside the archive records the image ref + id, CUDA version,
+  arch list, module list and source tarball checksums, so an artifact can always
+  be traced back to its inputs.
+
 Artifacts land in `vins_adapter/`:
 
 | path | what |
