@@ -16,9 +16,12 @@
 # After a run, pin the printed sha256 in .github/workflows/release.yml
 # (env.DEFAULT_OPENCV_CUDA_TARBALL / env.DEFAULT_OPENCV_CUDA_SHA256).
 #
-# Full 6-arch build takes ~40-50 min on a 2-core runner (the CUDA kernels are
-# compiled once per arch). Cached sources do not help much: the build tree is
-# intentionally fresh every run so the arch list in the artifact is trustworthy.
+# Runtime: the CUDA kernels are compiled once per arch, so cost scales with the
+# arch list and inversely with core count -- ~40 min for all six archs on 16 cores,
+# but *hours* on the 2-core hosted runner (job limit is 6 h, hence the timeout
+# below). For a production rebuild prefer `tools/build_opencv_cuda.sh` on any
+# x86_64 machine with docker (no GPU needed; t4 does it in ~40 min) and upload the
+# result, or run this workflow with a reduced `arch_bin` when testing the glue.
 name: Build CUDA OpenCV
 
 on:
@@ -43,6 +46,7 @@ jobs:
   build:
     name: Build multi-arch CUDA OpenCV
     runs-on: ubuntu-22.04   # x86_64; the pinned image is amd64
+    timeout-minutes: 350    # a 2-core runner needs hours for all six archs
 
     steps:
       - name: Check out
