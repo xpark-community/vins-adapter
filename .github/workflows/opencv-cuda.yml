@@ -62,7 +62,7 @@ jobs:
           ARCH_BIN: ${{ inputs.arch_bin }}
         run: |
           set -euo pipefail
-          ./tools/build_opencv_cuda.sh --arch-bin "$ARCH_BIN" --out dist
+          bash tools/build_opencv_cuda.sh --arch-bin "$ARCH_BIN" --out dist
 
       - name: Verify the artifact
         run: |
@@ -71,8 +71,9 @@ jobs:
           md5file="$tarball.md5"
           shafile="$tarball.sha256"
           test -s "$md5file" && test -s "$shafile"
-          md5sum -c "$md5file"
-          sha256sum -c "$shafile"
+          # The checksum files name the archive by basename, so verify from its dir.
+          ( cd "$(dirname "$tarball")" && md5sum -c "$(basename "$md5file")" \
+              && sha256sum -c "$(basename "$shafile")" )
           listing="$(tar -tzf "$tarball")"
           grep -q '/lib/cmake/opencv4/OpenCVConfig.cmake$' <<<"$listing" \
             || { echo "::error::the archive carries no OpenCVConfig.cmake"; exit 1; }
