@@ -183,3 +183,6 @@ vins_adapter.tar.gz
 vins_adapter.tar.gz.md5
 vins_adapter-linux-*.tar.gz
 vins_adapter-linux-*.tar.gz.md5
+
+# CUDA OpenCV build cache (tools/build_opencv_cuda.sh)
+.opencv-cuda-cache/

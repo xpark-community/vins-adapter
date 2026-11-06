@@ -1,0 +1,116 @@
+# Build and publish the CUDA-enabled OpenCV install that `vins_adapter_gpu` links
+# against.
+#
+# Why a separate workflow: the OpenCV is a first-class artifact of this project.
+# `VINS-Fusion-gpu` links `${OpenCV_LIBS}` -- *every* module of the OpenCV it is
+# configured against -- so the GPU binary hard-requires that exact module set at
+# run time. The release workflow pins this asset by URL + sha256; this workflow is
+# how that asset is (re)produced, without a personal VM and without a GPU (nvcc
+# emits fatbins for every arch in CUDA_ARCH_BIN, the build host needs no device).
+#
+# Usage: Actions -> "Build CUDA OpenCV" -> Run workflow
+#   tag       release to attach the asset to (e.g. v0.1.1)
+#   arch_bin  CUDA_ARCH_BIN list (default covers T4/A100/A10/L20/H100/RTX PRO 5000)
+#   upload    uncheck to only build + report the sha256
+#
+# After a run, pin the printed sha256 in .github/workflows/release.yml
+# (env.DEFAULT_OPENCV_CUDA_TARBALL / env.DEFAULT_OPENCV_CUDA_SHA256).
+#
+# Full 6-arch build takes ~40-50 min on a 2-core runner (the CUDA kernels are
+# compiled once per arch). Cached sources do not help much: the build tree is
+# intentionally fresh every run so the arch list in the artifact is trustworthy.
+name: Build CUDA OpenCV
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the OpenCV asset to
+        required: true
+      arch_bin:
+        description: CUDA_ARCH_BIN (semicolon separated)
+        required: false
+        default: '7.5;8.0;8.6;8.9;9.0;12.0'
+      upload:
+        description: Upload the built assets to that release
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # required to upload assets to the release
+
+jobs:
+  build:
+    name: Build multi-arch CUDA OpenCV
+    runs-on: ubuntu-22.04   # x86_64; the pinned image is amd64
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Free up disk space on the runner
+        # nvidia/cuda:<ver>-devel is ~7 GB and the OpenCV build tree another few GB;
+        # the hosted runner ships with a lot of unused toolchains.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/share/swift \
+                      /opt/microsoft /usr/local/lib/node_modules
+          df -h /
+
+      - name: Build the OpenCV install prefix
+        env:
+          ARCH_BIN: ${{ inputs.arch_bin }}
+        run: |
+          set -euo pipefail
+          ./tools/build_opencv_cuda.sh --arch-bin "$ARCH_BIN" --out dist
+
+      - name: Verify the artifact
+        run: |
+          set -euo pipefail
+          tarball="$(ls dist/opencv-cuda-*-linux-x86_64.tar.gz)"
+          md5file="$tarball.md5"
+          shafile="$tarball.sha256"
+          test -s "$md5file" && test -s "$shafile"
+          md5sum -c "$md5file"
+          sha256sum -c "$shafile"
+          listing="$(tar -tzf "$tarball")"
+          grep -q '/lib/cmake/opencv4/OpenCVConfig.cmake$' <<<"$listing" \
+            || { echo "::error::the archive carries no OpenCVConfig.cmake"; exit 1; }
+          # The adapter's GPU binary needs these; a leaner OpenCV makes it fall
+          # back to CPU on workers, which is exactly the regression this guards.
+          for mod in core imgproc imgcodecs calib3d features2d flann highgui video \
+                     photo gapi videostab optflow ximgproc cudaarithm cudafeatures2d \
+                     cudafilters cudaimgproc cudaoptflow cudawarping cudev; do
+            grep -q "libopencv_${mod}\.so\." <<<"$listing" \
+              || { echo "::error::missing OpenCV module: $mod"; exit 1; }
+          done
+          echo "--- BUILDINFO.txt ---"
+          cat dist/opencv-cuda-*/BUILDINFO.txt
+          ls -lh "$tarball" "$md5file" "$shafile"
+
+      - name: Upload the assets to the release
+        if: ${{ inputs.upload }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/opencv-cuda-*.tar.gz \
+            dist/opencv-cuda-*.tar.gz.md5 dist/opencv-cuda-*.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "Uploaded OpenCV assets to $TAG"
+
+      - name: Pin instructions
+        run: |
+          set -euo pipefail
+          tarball="$(ls dist/opencv-cuda-*-linux-x86_64.tar.gz)"
+          sha="$(awk '{print $1}' "$tarball.sha256")"
+          {
+            echo "### Pin these in \`.github/workflows/release.yml\`"
+            echo ""
+            echo '```yaml'
+            echo "env:"
+            echo "  DEFAULT_OPENCV_CUDA_TARBALL: https://github.com/$GITHUB_REPOSITORY/releases/download/${{ inputs.tag }}/$(basename "$tarball")"
+            echo "  DEFAULT_OPENCV_CUDA_SHA256: $sha"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
