@@ -40,6 +40,12 @@ class FeatureTracker
 {
 public:
     FeatureTracker();
+    // Cumulative counts across all trackImage() calls: tracked left features
+    // and surviving left->right observations. The offline adapter reads the
+    // ratio after the run to detect a stereo front-end that never engaged
+    // (see vins_adapter.cpp).
+    long stereo_obs_total = 0;
+    long feature_obs_total = 0;
     map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
     void setMask();
     void addPoints();

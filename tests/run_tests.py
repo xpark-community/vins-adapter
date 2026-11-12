@@ -49,10 +49,16 @@ ADAPTER_SPEC_H = REPO / "src" / "adapter_spec.h"
 # The VINS-Fusion sources are bundled (no submodules) under thirdparty/.
 _THIRDPARTY = REPO / "thirdparty"
 ESTIMATOR_H = _THIRDPARTY / "VINS-Fusion" / "vins_estimator" / "src" / "estimator" / "estimator.h"
+FEATURE_TRACKER_H = (
+    _THIRDPARTY / "VINS-Fusion" / "vins_estimator" / "src" / "featureTracker" / "feature_tracker.h"
+)
 VISUALIZATION_CPP = _THIRDPARTY / "VINS-Fusion" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
 VINS_CMAKELISTS = _THIRDPARTY / "VINS-Fusion" / "vins_estimator" / "CMakeLists.txt"
 # The CUDA fork carries its own copies of the adapter-critical fixes.
 GPU_ESTIMATOR_H = _THIRDPARTY / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "estimator" / "estimator.h"
+GPU_FEATURE_TRACKER_H = (
+    _THIRDPARTY / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "featureTracker" / "feature_tracker.h"
+)
 GPU_VISUALIZATION_CPP = _THIRDPARTY / "VINS-Fusion-gpu" / "vins_estimator" / "src" / "utility" / "visualization.cpp"
 GPU_VINS_CMAKELISTS = _THIRDPARTY / "VINS-Fusion-gpu" / "vins_estimator" / "CMakeLists.txt"
 DEFAULT_ADAPTER = REPO / "vins_adapter" / "run_vins_adapter.sh"
@@ -84,13 +90,17 @@ def _png_chunk(typ: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + typ + data + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
 
 
-def make_frame(i: int, width: int = WIDTH, height: int = HEIGHT, noise: bool = False) -> bytes:
+def make_frame(
+    i: int, width: int = WIDTH, height: int = HEIGHT, noise: bool = False, seed: int = 1234
+) -> bytes:
     """One 8-bit grayscale PNG frame: a bright square sweeping a textured field.
 
     Hand-rolled PNG (stdlib zlib only -- no OpenCV/PIL needed on the host), in
-    the extension set the adapter accepts (.png).
+    the extension set the adapter accepts (.png). ``seed`` varies the noise
+    field so two directories written with different seeds hold *independent*
+    noise (identical noise would match perfectly under LK).
     """
-    rng = random.Random(1234)
+    rng = random.Random(seed)
     rows = []
     for y in range(height):
         row = bytearray(width)
@@ -117,10 +127,10 @@ def make_frame(i: int, width: int = WIDTH, height: int = HEIGHT, noise: bool = F
     )
 
 
-def write_frames(directory: Path, n: int, noise: bool = False) -> None:
+def write_frames(directory: Path, n: int, noise: bool = False, seed: int = 1234) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for i in range(n):
-        (directory / f"{i:06d}.png").write_bytes(make_frame(i, noise=noise))
+        (directory / f"{i:06d}.png").write_bytes(make_frame(i, noise=noise, seed=seed))
 
 
 def write_config(
@@ -186,6 +196,19 @@ def test_source_guards() -> None:
         'EX_CALIB_RESULT_PATH = (tmp_dir / "extrinsic_result.yaml").string();' in src,
         "empty path -> printStatistics() logs \"Can't open file: '' in write "
         "mode\" on every NON_LINEAR frame once ESTIMATE_EXTRINSIC != 0",
+    )
+    check(
+        "stereo-engagement gate present (never-engaged stereo fails loudly)",
+        "stereo front-end not engaged" in src and "stereo_obs_total" in src,
+        "wide-vergence rigs (e.g. Aria's ~75 deg SLAM pair) match ~0% of "
+        "left->right features; without the gate the adapter silently emits a "
+        "rotation-only trajectory that reads as a valid run downstream",
+    )
+    check(
+        "stereo_obs_total counter present in the CPU fork's tracker",
+        "stereo_obs_total" in FEATURE_TRACKER_H.read_text(encoding="utf-8"),
+        "the adapter's stereo-engagement gate reads the tracker's cumulative "
+        "left->right observation count (docker build compiles the CPU fork)",
     )
 
     est = ESTIMATOR_H.read_text(encoding="utf-8")
@@ -271,6 +294,14 @@ def test_gpu_source_guards() -> None:
         "gpu: estimator built with -DNDEBUG",
         "-DNDEBUG" in cmake,
         "without NDEBUG the GPU build aborts on unadvertised publish() calls",
+    )
+
+    gpu_tracker = GPU_FEATURE_TRACKER_H.read_text(encoding="utf-8")
+    check(
+        "gpu: stereo_obs_total counter present",
+        "stereo_obs_total" in gpu_tracker,
+        "the adapter's stereo-engagement gate reads the tracker's cumulative "
+        "left->right observation count; the CUDA fork must carry it too",
     )
     check(
         "gpu: OpenCV found via find_package, not a hardcoded path",
@@ -471,6 +502,29 @@ def test_functional(adapter: str) -> None:
             if proc.returncode == 0:
                 assert_valid_tum(name, tum, allow_empty=True)
             check(f"{name}: scratch dir cleaned up", tmp_dir_count() <= before, f"after={tmp_dir_count()}")
+
+        # Wide-vergence rig stand-in: stereo configured, but the left stream
+        # feeds trackable textured frames while the right stream is independent
+        # noise -- no left->right match can survive, the stand-in for rigs whose
+        # vergence defeats appearance-based matching (measured ~0% on Aria's
+        # 75-deg pair). The adapter must refuse to write a rotation-only
+        # trajectory (exit 1, no output file).
+        before = tmp_dir_count()
+        unmatch_l, unmatch_r = work / "stereo_unmatchable_l", work / "stereo_unmatchable_r"
+        write_frames(unmatch_l, N_FRAMES)
+        write_frames(unmatch_r, N_FRAMES, noise=True, seed=99)
+        cfg = work / "stereo_unmatchable.yaml"
+        write_config(cfg, unmatch_l, unmatch_r)
+        tum = work / "stereo_unmatchable.tum"
+        proc = run_adapter(adapter, cfg, tum)
+        check(
+            "stereo that never engages fails loudly (exit 1, no trajectory)",
+            proc.returncode == 1
+            and "stereo front-end not engaged" in proc.stderr
+            and not tum.exists(),
+            f"exit={proc.returncode} stderr={proc.stderr[-200:]!r}",
+        )
+        check("stereo never-engaged: scratch dir cleaned up", tmp_dir_count() <= before, f"after={tmp_dir_count()}")
 
         # --cpu must select the CPU binary through the launcher and behave like
         # the default (which is the GPU binary whenever it is usable).

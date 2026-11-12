@@ -230,6 +230,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
             ids_right = ids;
             reduceVector(cur_right_pts, status);
             reduceVector(ids_right, status);
+            stereo_obs_total += (long)ids_right.size();
             // only keep left-right pts
             /*
             reduceVector(cur_pts, status);
@@ -243,6 +244,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         }
         prev_un_right_pts_map = cur_un_right_pts_map;
     }
+    feature_obs_total += (long)cur_pts.size();
     if(SHOW_TRACK)
         drawTrack(cur_img, rightImg, ids, cur_pts, cur_right_pts, prevLeftPtsMap);
 

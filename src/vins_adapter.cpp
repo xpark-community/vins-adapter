@@ -33,6 +33,9 @@
 // episodes legitimately produce fewer poses than frames.
 //
 // Exit codes: 0 ok, 2 usage error, 1 runtime failure (message on stderr).
+// A stereo run whose left->right matching engaged zero features (wide-vergence
+// rig; the estimator would silently emit a rotation-only trajectory) is
+// reported as a runtime failure and writes no trajectory.
 //
 // The input/output contract itself (config resolution, csv parsing, TUM line
 // formatting, the pose emission gate) lives in adapter_spec.h so it can be
@@ -50,7 +53,9 @@
 #include "adapter_spec.h"  // the in/out spec (unit tested)
 #include "estimator/estimator.h"  // Estimator + the parameters.h globals
 
+#include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <cstdio>
@@ -309,6 +314,43 @@ int main(int argc, char **argv) {
   if (run_error != nullptr) {
     std::cerr << "vins_adapter: " << run_error << "\n";
     return 1;
+  }
+
+  // Stereo-engagement gate. The LK-based left->right matching in the feature
+  // tracker assumes a near-parallel stereo pair (small, translation-like
+  // disparities); on wide-vergence rigs (e.g. Aria's two SLAM cameras, ~75 deg
+  // apart) it matches nothing, the estimator degenerates to IMU-less mono and
+  // silently emits a rotation-only trajectory. That is an input/geometry
+  // incompatibility, so refuse it instead of writing a trajectory that reads
+  // as a valid run downstream. The gate is a rate (a strict zero is not
+  // robust: accidental forward-backward-consistent matches occur even on
+  // unmatchable pairs), and 2% is far below any functioning pair while far
+  // above the accidental-match floor (measured ~0.6% on Aria's 75-deg pair).
+  if (spec.stereo) {
+    const long stereo_obs = estimator.featureTracker.stereo_obs_total;
+    const long feature_obs = estimator.featureTracker.feature_obs_total;
+    const double rate =
+        feature_obs > 0 ? (100.0 * (double)stereo_obs / (double)feature_obs) : 0.0;
+    const double baseline = (TIC.size() > 1 ? (TIC[1] - TIC[0]).norm() : 0.0);
+    const double cos_half =
+        0.5 * ((RIC[0].transpose() * RIC[1]).trace() - 1.0);
+    const double vergence_deg =
+        std::acos(std::max(-1.0, std::min(1.0, cos_half))) * 180.0 / M_PI;
+    if (rate < 2.0) {
+      std::remove(output_path.c_str());
+      std::cerr << "vins_adapter: stereo front-end not engaged: " << stereo_obs
+                << " left-right matches over " << feature_obs
+                << " tracked-feature observations (" << rate << "%, need >= 2%) "
+                << "in " << n_frames << " frames (rig vergence " << vergence_deg
+                << " deg, baseline " << baseline
+                << " m). The LK-based stereo matching assumes a near-parallel "
+                   "pair with small disparities; VINS-Fusion cannot produce a "
+                   "metric trajectory for this input. Provide IMU, or a solver "
+                   "with wide-baseline matching.\n";
+      return 1;
+    }
+    std::printf("vins_adapter: stereo engagement: %ld left-right obs / %ld feature obs (%.1f%%)\n",
+                stereo_obs, feature_obs, rate);
   }
   return 0;
 }
